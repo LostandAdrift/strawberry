@@ -314,15 +314,12 @@ void QobuzService::Authenticate() {
   url_query.addQueryItem(u"redirect_url"_s, QStringLiteral("http://127.0.0.1:%1").arg(local_redirect_server_->port()));
   url.setQuery(url_query);
 
-  const bool success = QDesktopServices::openUrl(url);
-  if (!success) {
-    qLog(Error) << "Qobuz: Failed to open URL" << url.toString();
-    LoginError(tr("Failed to open the web browser. Please open this URL manually: %1").arg(url.toString()));
-    local_redirect_server_->close();
-    local_redirect_server_->deleteLater();
-    local_redirect_server_ = nullptr;
-    return;
-  }
+  pending_sign_in_url_ = url;
+
+  // No error here when the browser can't be started: the sign-in keeps waiting and the caller shows the address so the user can open it by hand.
+  const bool opened = QDesktopServices::openUrl(url);
+  if (!opened) qLog(Error) << "Qobuz: Failed to open the browser for sign-in";
+  Q_EMIT AuthorizationLinkReady(url, opened);
 
   Q_EMIT UpdateStatus(tr("Waiting for browser authentication..."));
 
@@ -466,6 +463,8 @@ void QobuzService::HandleOAuthCallbackReply(QNetworkReply *reply) {
   s.setValue(QobuzSettings::kUserId, user_id_);
   s.endGroup();
 
+  pending_sign_in_url_.clear();
+
   qLog(Debug) << "Qobuz: OAuth login successful" << "user id" << user_id_;
 
   Q_EMIT LoginFinished(true);
@@ -478,6 +477,43 @@ void QobuzService::HandleLoginSSLErrors(const QList<QSslError> &ssl_errors) {
   for (const QSslError &ssl_error : ssl_errors) {
     qLog(Debug) << "Qobuz" << ssl_error.errorString();
   }
+
+}
+
+bool QobuzService::authentication_pending() const {
+  return local_redirect_server_ || !replies_.isEmpty();
+}
+
+void QobuzService::CancelAuthentication() {
+
+  pending_sign_in_url_.clear();
+
+  if (local_redirect_server_) {
+    QObject::disconnect(local_redirect_server_, nullptr, this, nullptr);
+    local_redirect_server_->close();
+    local_redirect_server_->deleteLater();
+    local_redirect_server_ = nullptr;
+  }
+
+  // The reply of the code exchange must not store a token after the user cancelled.
+  while (!replies_.isEmpty()) {
+    QNetworkReply *reply = replies_.takeFirst();
+    QObject::disconnect(reply, nullptr, this, nullptr);
+    reply->abort();
+    reply->deleteLater();
+  }
+
+}
+
+void QobuzService::SaveAppCredentials(const QString &app_id, const QString &app_secret, const QString &private_key) {
+
+  Settings s;
+  s.beginGroup(QobuzSettings::kSettingsGroup);
+  s.setValue(QobuzSettings::kAppId, app_id.trimmed());
+  s.setValue(QobuzSettings::kAppSecret, app_secret.trimmed());
+  s.setValue(QobuzSettings::kPrivateKey, private_key.trimmed());
+  s.endGroup();
+  ReloadSettings();
 
 }
 
@@ -494,6 +530,8 @@ void QobuzService::ClearSession() {
   s.remove(QobuzSettings::kUserAuthToken);
   s.endGroup();
 
+
+  Q_EMIT SessionChanged();
 }
 
 void QobuzService::ResetArtistsRequest() {

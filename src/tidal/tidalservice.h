@@ -78,6 +78,13 @@ class TidalService : public StreamingService {
   void ReloadSettings() override;
 
   void ClearSession();
+  // In-app sign-in support (see StreamingAccount). The sign-in itself is StartAuthorization() and the browser callback AuthorizationUrlReceived().
+  bool has_client_id() const { return !client_id_.isEmpty(); }
+  bool authorization_pending() const;
+  QUrl pending_authorization_url() const;
+  void CancelAuthorization();
+  // Stores a developer client id the user entered (kept in the normal settings as a custom client id) and applies it.
+  void SaveClientId(const QString &client_id);
   void AccessTokenRejected(const QByteArray &authorization_header);
   int Search(const QString &text, const SearchType type) override;
   void CancelSearch() override;
@@ -113,6 +120,11 @@ class TidalService : public StreamingService {
   CollectionFilter *artists_collection_filter_model() override;
   CollectionFilter *albums_collection_filter_model() override;
   CollectionFilter *songs_collection_filter_model() override;
+
+ Q_SIGNALS:
+  void SessionChanged();
+  // The browser address for the sign-in in progress. `opened` is false when the desktop could not start a browser.
+  void AuthorizationLinkReady(const QUrl &url, const bool opened);
 
  public Q_SLOTS:
   void StartAuthorization(const QString &client_id);

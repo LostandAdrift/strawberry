@@ -39,6 +39,7 @@ class QProgressBar;
 class QShowEvent;
 class QPushButton;
 
+// Superseded by StreamingImportView (inline page with account sign-in). Kept only until MainWindow switches over.
 // Native dialog to read the user's streaming playlists and import them as local snapshots.
 // Read-only towards the service. A refresh replaces the dedicated local snapshot after a complete, successful read.
 class PlaylistImportDialog : public QDialog {

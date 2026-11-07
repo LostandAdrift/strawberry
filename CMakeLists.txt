@@ -873,6 +873,8 @@ set(SOURCES
   src/streaming/streamingservice.cpp
   src/streaming/playlistimport.cpp
   src/streaming/playlistimportdialog.cpp
+  src/streaming/streamingaccount.cpp
+  src/streaming/streamingimportview.cpp
   src/streaming/streamserviceplaylistitem.cpp
   src/streaming/streamingsearchview.cpp
   src/streaming/streamingsearchmodel.cpp
@@ -1203,6 +1205,8 @@ set(HEADERS
   src/streaming/streamingservice.h
   src/streaming/playlistimport.h
   src/streaming/playlistimportdialog.h
+  src/streaming/streamingaccount.h
+  src/streaming/streamingimportview.h
   src/streaming/streamsongmimedata.h
   src/streaming/streamingsearchmodel.h
   src/streaming/streamingsearchsortmodel.h
@@ -1696,6 +1700,7 @@ if(HAVE_TIDAL)
     src/tidal/tidalbaserequest.cpp
     src/tidal/tidalrequest.cpp
     src/tidal/tidalplaylistsource.cpp
+    src/tidal/tidalaccount.cpp
     src/tidal/tidalstreamurlrequest.cpp
     src/tidal/tidalfavoriterequest.cpp
     src/settings/tidalsettingspage.cpp
@@ -1707,6 +1712,7 @@ if(HAVE_TIDAL)
     src/tidal/tidalbaserequest.h
     src/tidal/tidalrequest.h
     src/tidal/tidalplaylistsource.h
+    src/tidal/tidalaccount.h
     src/tidal/tidalstreamurlrequest.h
     src/tidal/tidalfavoriterequest.h
     src/settings/tidalsettingspage.h
@@ -1748,6 +1754,7 @@ if(HAVE_QOBUZ)
     src/qobuz/qobuzbaserequest.cpp
     src/qobuz/qobuzrequest.cpp
     src/qobuz/qobuzplaylistsource.cpp
+    src/qobuz/qobuzaccount.cpp
     src/qobuz/qobuzstreamurlrequest.cpp
     src/qobuz/qobuzfavoriterequest.cpp
     src/qobuz/qobuzmetadatarequest.cpp
@@ -1761,6 +1768,7 @@ if(HAVE_QOBUZ)
     src/qobuz/qobuzbaserequest.h
     src/qobuz/qobuzrequest.h
     src/qobuz/qobuzplaylistsource.h
+    src/qobuz/qobuzaccount.h
     src/qobuz/qobuzstreamurlrequest.h
     src/qobuz/qobuzfavoriterequest.h
     src/qobuz/qobuzmetadatarequest.h

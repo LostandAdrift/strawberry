@@ -10,7 +10,7 @@ set(TESTUTILS-SOURCES
   src/test_utils.cpp
 )
 
-set(TESTUTILS-MOC-HEADERS src/mock_networkaccessmanager.h src/test_utils.h)
+set(TESTUTILS-MOC-HEADERS src/mock_networkaccessmanager.h src/test_utils.h src/urlcatcher.h)
 
 qt_wrap_cpp(TESTUTILS-SOURCES-MOC ${TESTUTILS-MOC-HEADERS})
 
@@ -121,6 +121,9 @@ add_test_file(src/playlistimport_test.cpp true)
 # A repeatable resize measurement (prints timings, asserts nothing about speed). Run it directly with QT_QPA_PLATFORM=offscreen.
 add_test_file(src/adrift_resize_bench.cpp true)
 set_tests_properties(adrift_resize_bench PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;ADRIFT_BENCH_ROUNDS=1" LABELS bench)
+add_test_file(src/streamingimportview_test.cpp true)
+target_compile_definitions(streamingimportview_test PRIVATE ADRIFT_SCREENSHOT_DIR="${ADRIFT_SCREENSHOT_DIR}")
+set_tests_properties(streamingimportview_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 add_test_file(src/utilities_test.cpp false)
 add_test_file(src/networkproxyfactory_test.cpp false)
 add_test_file(src/temporaryfile_test.cpp false)

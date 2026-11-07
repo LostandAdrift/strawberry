@@ -80,6 +80,13 @@ class QobuzService : public StreamingService {
   void ReloadSettings() override;
 
   void ClearSession();
+  // In-app sign-in support (see StreamingAccount).
+  bool has_app_credentials() const { return !app_id_.isEmpty() && !app_secret_.isEmpty() && !private_key_.isEmpty(); }
+  bool authentication_pending() const;
+  QUrl pending_sign_in_url() const { return pending_sign_in_url_; }
+  void CancelAuthentication();
+  // Stores the developer app credentials the user entered and applies them.
+  void SaveAppCredentials(const QString &app_id, const QString &app_secret, const QString &private_key);
   int Search(const QString &text, const SearchType type) override;
   void CancelSearch() override;
 
@@ -116,6 +123,11 @@ class QobuzService : public StreamingService {
   CollectionFilter *artists_collection_filter_model() override;
   CollectionFilter *albums_collection_filter_model() override;
   CollectionFilter *songs_collection_filter_model() override;
+
+ Q_SIGNALS:
+  void SessionChanged();
+  // The browser address for the sign-in in progress. `opened` is false when the desktop could not start a browser.
+  void AuthorizationLinkReady(const QUrl &url, const bool opened);
 
  public Q_SLOTS:
   void Authenticate();
@@ -190,6 +202,7 @@ class QobuzService : public StreamingService {
 
   qint64 user_id_;
   QString user_auth_token_;
+  QUrl pending_sign_in_url_;
 
   int pending_search_id_;
   int next_pending_search_id_;

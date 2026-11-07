@@ -389,8 +389,9 @@ TEST_F(PlaylistImporterTest, ExpiredLoginMidwayFailsWithoutPartialImport) {
   ASSERT_TRUE(WaitFor([this]() { return !captured.failures.isEmpty() || !captured.imports.isEmpty(); }));
 
   ASSERT_EQ(1, captured.failures.size());
-  EXPECT_TRUE(captured.failures[0].contains(QStringLiteral("401")));
-  EXPECT_TRUE(captured.failures[0].contains(QStringLiteral("log in"), Qt::CaseInsensitive));
+  // Plain words, no status code: the code is in the technical details of the classified failure.
+  EXPECT_FALSE(captured.failures[0].contains(QStringLiteral("401")));
+  EXPECT_TRUE(captured.failures[0].contains(QStringLiteral("Reconnect")));
   EXPECT_TRUE(captured.imports.isEmpty());  // nothing from page 1 leaks out
   EXPECT_FALSE(importer.busy());
 
@@ -401,7 +402,9 @@ TEST_F(PlaylistImporterTest, ServerErrorsAndMalformedBodiesFailCleanly) {
   source.responder = [](const bool, const QString &, const int, const int) { return HttpError(503, QStringLiteral("Received HTTP code 503")); };
   importer.ImportPlaylist(Info());
   ASSERT_TRUE(WaitFor([this]() { return !captured.failures.isEmpty(); }));
-  EXPECT_EQ(QStringLiteral("Received HTTP code 503"), captured.failures[0]);
+  EXPECT_TRUE(captured.failures[0].contains(QStringLiteral("problem on its side")));
+  EXPECT_TRUE(captured.failures[0].contains(QStringLiteral("Nothing was imported")));
+  EXPECT_FALSE(captured.failures[0].contains(QStringLiteral("503")));
 
   captured.failures.clear();
   source.responder = [](const bool, const QString &, const int, const int) { return Ok(Json(R"({"unexpected": true})")); };
@@ -766,7 +769,7 @@ TEST_F(PlaylistImportDialogTest, RemoteTextIsShownAsPlainText) {
   dialog.load_button()->click();
   ASSERT_TRUE(WaitFor([this]() { return !dialog.loading(); }));
   EXPECT_EQ(Qt::PlainText, dialog.status_label()->textFormat());
-  EXPECT_TRUE(dialog.status_label()->text().contains(QStringLiteral("<b>bold</b>")));
+  EXPECT_FALSE(dialog.status_label()->text().contains(QStringLiteral("<b>bold</b>")));  // raw server text is kept out of the sentence
 
 }
 

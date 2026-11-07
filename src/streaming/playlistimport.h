@@ -111,10 +111,42 @@ class Paginator {
 // Result of one request, as delivered by a PageSource. Never contains secrets.
 struct PageResult {
   bool ok = false;
-  QString error;           // User-readable message when !ok
+  QString error;           // Message from the request layer when !ok. May be technical; shown only under "Technical details".
   int http_status = 0;     // 0 if unknown
+  int network_error = 0;   // QNetworkReply::NetworkError of the reply, 0 (NoError) if unknown
+  int retry_after_sec = 0; // From a Retry-After header, 0 if absent
+  bool not_signed_in = false;  // The source did not even send the request because there is no session
   QJsonObject json;
 };
+
+// Why a read failed, in the terms the user can act on.
+enum class FailureKind {
+  NotSignedIn,       // there is no session: sign in
+  AuthExpired,       // the session was rejected (HTTP 401): reconnect
+  PermissionDenied,  // the account is not allowed to read this (HTTP 403): permissions or subscription
+  Offline,           // no connection to the service
+  Timeout,
+  RateLimited,       // HTTP 429
+  ServerError,       // HTTP 5xx
+  BadResponse,       // the reply could not be understood or is inconsistent
+  Cancelled
+};
+
+struct Failure {
+  FailureKind kind = FailureKind::BadResponse;
+  QString title;        // short, plain text
+  QString message;      // one or two human sentences, says what happened and that nothing was imported
+  QString details;      // technical text (status codes, reply text) for the collapsible details
+  int http_status = 0;
+  int retry_after_sec = 0;
+  bool retryable = false;  // Repeating the same read can reasonably help
+  bool needs_signin = false;
+};
+
+// Turns a failed page into a Failure. `service_name` is used in the wording.
+Failure ClassifyFailure(const PageResult &result, const QString &service_name);
+// Failures that the importer itself detects (inconsistent paging and so on).
+Failure BadResponseFailure(const QString &message, const QString &details = QString());
 
 // Asynchronous page access. One request at a time. Cancel() must make sure no further PageReady is emitted for the cancelled request.
 class PageSource : public QObject {
@@ -165,6 +197,8 @@ class Importer : public QObject {
   void PlaylistsLoaded(const QList<PlaylistImport::PlaylistInfo> &playlists);
   // `skipped` is the number of entries left out because they are unavailable (not playable); order and duplicates of the others are kept.
   void PlaylistImported(const PlaylistImport::PlaylistInfo &playlist, const QList<PlaylistImport::Track> &tracks, const int skipped);
+  // Emitted together with Failed(), carries the classification.
+  void FailureOccurred(const PlaylistImport::Failure &failure);
   void Failed(const QString &message);
   void Cancelled();
 
@@ -175,6 +209,7 @@ class Importer : public QObject {
   void SetState(const State state);
   void Reset();
   void Fail(const QString &message);
+  void Fail(const Failure &failure);
   void RequestNext();
   void Finish();
 
@@ -191,6 +226,7 @@ class Importer : public QObject {
 }  // namespace PlaylistImport
 
 Q_DECLARE_METATYPE(PlaylistImport::PageResult)
+Q_DECLARE_METATYPE(PlaylistImport::Failure)
 Q_DECLARE_METATYPE(PlaylistImport::PlaylistInfo)
 Q_DECLARE_METATYPE(PlaylistImport::Track)
 Q_DECLARE_METATYPE(PlaylistImport::Importer::State)

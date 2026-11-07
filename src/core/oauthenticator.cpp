@@ -265,6 +265,9 @@ void OAuthenticator::ClearSession() {
     timer_refresh_login_->stop();
   }
 
+
+  Q_EMIT SessionCleared();
+
 }
 
 void OAuthenticator::StartRefreshLoginTimer() {
@@ -415,11 +418,30 @@ void OAuthenticator::Authenticate() {
   QUrl url(authorize_url_);
   url.setQuery(url_query);
 
-  const bool success = QDesktopServices::openUrl(url);
-  if (!success) {
-    QMessageBox messagebox(QMessageBox::Information, tr("Authentication"), tr("Please open this URL in your browser") + QStringLiteral(":<br /><a href=\"%1\">%1</a>").arg(url.toString()), QMessageBox::Ok);
-    messagebox.setTextFormat(Qt::RichText);
-    messagebox.exec();
+  pending_authorize_url_ = url;
+
+  // No modal message box: when the browser can't be started the caller gets the address and shows it inline, the flow stays pending.
+  const bool opened = QDesktopServices::openUrl(url);
+  Q_EMIT AuthorizationUrlReady(url, opened);
+
+}
+
+void OAuthenticator::CancelAuthentication() {
+
+  state_.clear();
+  pending_authorize_url_.clear();
+  code_verifier_.clear();
+  code_challenge_.clear();
+  local_redirect_server_.reset();
+
+  // Only a code exchange is aborted. A background refresh of an existing session is left alone.
+  const QList<QNetworkReply*> replies = replies_;
+  for (QNetworkReply *reply : replies) {
+    if (reply->property("adrift_refresh").toBool()) continue;
+    replies_.removeAll(reply);
+    QObject::disconnect(reply, nullptr, this, nullptr);
+    reply->abort();
+    reply->deleteLater();
   }
 
 }
@@ -448,6 +470,13 @@ void OAuthenticator::ExternalAuthorizationUrlReceived(const QUrl &request_url) {
 }
 
 void OAuthenticator::AuthorizationUrlReceived(const QUrl &request_url, const QUrl &redirect_url) {
+
+  // A callback is only accepted for a sign-in that is waiting for it. A late, repeated or foreign callback (the sign-in was cancelled, finished or replaced)
+  // is refused and never starts a token exchange.
+  if (state_.isEmpty()) {
+    Q_EMIT AuthenticationFinished(false, tr("No sign-in is waiting for this reply. Start the sign-in again."));
+    return;
+  }
 
   if (!request_url.isValid()) {
     Q_EMIT AuthenticationFinished(false, tr("Received invalid reply from web browser."));
@@ -482,9 +511,13 @@ void OAuthenticator::AuthorizationUrlReceived(const QUrl &request_url, const QUr
   }
 
   if (url_query.queryItemValue(u"state"_s) != state_) {
-    Q_EMIT AuthenticationFinished(false, tr("Request URL has wrong state %1 != %2").arg(url_query.queryItemValue(u"state"_s), state_));
+    Q_EMIT AuthenticationFinished(false, tr("This reply belongs to an earlier sign-in attempt and was ignored."));
     return;
   }
+
+  // The state is single use: a repeated callback with the same code can't start a second exchange.
+  state_.clear();
+  pending_authorize_url_.clear();
 
   RequestAccessToken(url_query.queryItemValue(u"code"_s), redirect_url);
 
@@ -507,6 +540,7 @@ QNetworkReply *OAuthenticator::CreateAccessTokenRequest(const ParamList &params,
 
   QNetworkReply *reply = network_->post(network_request, url_query.toString(QUrl::FullyEncoded).toUtf8());
   replies_ << reply;
+  reply->setProperty("adrift_refresh", refresh_token);
   QObject::connect(reply, &QNetworkReply::sslErrors, this, &OAuthenticator::HandleSSLErrors);
   QObject::connect(reply, &QNetworkReply::finished, this, [this, reply, refresh_token]() { AccessTokenRequestFinished(reply, refresh_token); });
 

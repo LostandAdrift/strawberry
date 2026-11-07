@@ -77,6 +77,12 @@ class OAuthenticator : public QObject {
   QByteArray authorization_header() const;
 
   void Authenticate();
+  // True from Authenticate() until the flow finished, failed or was cancelled.
+  bool authentication_pending() const { return !state_.isEmpty(); }
+  // The address that was opened in the browser for the pending sign-in, empty when none is pending.
+  QUrl pending_authorize_url() const { return pending_authorize_url_; }
+  // Abandons a pending sign-in without reporting a failure: a callback that arrives later is refused because its state is no longer known.
+  void CancelAuthentication();
   void ClearSession();
   void LoadSession();
   void ExternalAuthorizationUrlReceived(const QUrl &request_url);
@@ -102,6 +108,10 @@ class OAuthenticator : public QObject {
 
  Q_SIGNALS:
   void Error(const QString &error);
+  // The sign-in address was handed to the desktop. `opened` is false when no browser could be started, then the user has to open it by hand.
+  void AuthorizationUrlReady(const QUrl &url, const bool opened);
+  // The stored session was removed (logout, refused refresh token, expired grant).
+  void SessionCleared();
   void AuthenticationFinished(const bool success, const QString &error = QString(), const bool invalid_grant = false);
 
  private Q_SLOTS:
@@ -128,6 +138,7 @@ class OAuthenticator : public QObject {
   bool use_pkce_;
 
   QString state_;
+  QUrl pending_authorize_url_;
 
   QString code_verifier_;
   QString code_challenge_;

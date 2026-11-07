@@ -367,7 +367,7 @@ void PlaylistImportDialog::ShowImported(const QString &playlist_name, const bool
 
 void PlaylistImportDialog::Failed(const QString &message) {
 
-  SetStatus(tr("Error: %1 Nothing was imported.").arg(message), true);
+  SetStatus(tr("Error: %1").arg(message), true);
   UpdateControls();
 
 }

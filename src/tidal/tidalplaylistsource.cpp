@@ -19,9 +19,12 @@
 
 #include "config.h"
 
+#include <algorithm>
+
 #include <QCoreApplication>
 #include <QMetaObject>
 #include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QString>
 
 #include "includes/shared_ptr.h"
@@ -54,7 +57,7 @@ void TidalPlaylistSource::RequestTracks(const QString &playlist_id, const int of
 void TidalPlaylistSource::Start(const QString &resource, const Request::ParamList &params) {
 
   if (!service_->authenticated()) {
-    EmitFailure(tr("You are not logged in to Tidal. Log in from the settings first."));
+    EmitFailure(tr("Not signed in"));
     return;
   }
 
@@ -75,7 +78,9 @@ void TidalPlaylistSource::ReplyFinished(QNetworkReply *reply, const quint64 gene
   const TidalBaseRequest::JsonObjectResult result = request_->Parse(reply);
 
   PlaylistImport::PageResult page;
-  page.http_status = result.http_status_code;
+  page.http_status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+  page.network_error = static_cast<int>(reply->error());
+  page.retry_after_sec = std::clamp(reply->rawHeader("Retry-After").toInt(), 0, 3600);
   if (result.error_code == TidalBaseRequest::ErrorCode::Success) {
     page.ok = true;
     page.json = result.json_object;
@@ -95,6 +100,7 @@ void TidalPlaylistSource::EmitFailure(const QString &message) {
     if (generation != generation_) return;
     PlaylistImport::PageResult page;
     page.error = message;
+    page.not_signed_in = true;
     Q_EMIT PageReady(page);
   }, Qt::QueuedConnection);
 

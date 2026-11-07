@@ -24,6 +24,7 @@
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QList>
+#include <QNetworkReply>
 #include <QString>
 #include <QUrl>
 
@@ -249,6 +250,94 @@ bool Paginator::Advance(const int raw_items_in_page, const int reported_total) {
 
 }
 
+Failure BadResponseFailure(const QString &message, const QString &details) {
+
+  Failure failure;
+  failure.kind = FailureKind::BadResponse;
+  failure.title = Tr("Unexpected reply");
+  failure.message = message;
+  failure.details = details;
+  failure.retryable = true;
+  return failure;
+
+}
+
+Failure ClassifyFailure(const PageResult &result, const QString &service_name) {
+
+  Failure failure;
+  failure.http_status = result.http_status;
+  failure.retry_after_sec = result.retry_after_sec;
+  failure.details = result.error;
+  if (result.http_status > 0) {
+    const QString status = QStringLiteral("HTTP %1").arg(result.http_status);
+    failure.details = failure.details.isEmpty() ? status : status + u": "_s + failure.details;
+  }
+  if (result.network_error > 0 && result.http_status <= 0) {
+    failure.details += (failure.details.isEmpty() ? QString() : u"\n"_s) + QStringLiteral("Network error code %1").arg(result.network_error);
+  }
+
+  const int net = result.network_error;
+
+  if (result.not_signed_in) {
+    failure.kind = FailureKind::NotSignedIn;
+    failure.title = Tr("Not signed in");
+    failure.message = Tr("You are not signed in to %1. Sign in to read your playlists.").arg(service_name);
+    failure.needs_signin = true;
+  }
+  else if (result.http_status == 401 || net == QNetworkReply::AuthenticationRequiredError) {
+    failure.kind = FailureKind::AuthExpired;
+    failure.title = Tr("Sign-in expired");
+    failure.message = Tr("%1 no longer accepts your sign-in. It probably expired or was revoked. Reconnect to continue.").arg(service_name);
+    failure.needs_signin = true;
+  }
+  else if (result.http_status == 403 || net == QNetworkReply::ContentAccessDenied || net == QNetworkReply::ContentOperationNotPermittedError) {
+    failure.kind = FailureKind::PermissionDenied;
+    failure.title = Tr("Access denied");
+    failure.message = Tr("%1 refused to share this list with this app. Your subscription or the permissions granted to Adrift may not include playlists. Reconnecting can renew the permissions.").arg(service_name);
+    failure.needs_signin = true;
+  }
+  else if (result.http_status == 429) {
+    failure.kind = FailureKind::RateLimited;
+    failure.title = Tr("Too many requests");
+    failure.message = result.retry_after_sec > 0 ? Tr("%1 asked Adrift to slow down. Try again in about %2 seconds.").arg(service_name).arg(result.retry_after_sec)
+                                                  : Tr("%1 asked Adrift to slow down. Wait a minute and try again.").arg(service_name);
+    failure.retryable = true;
+  }
+  else if (result.http_status == 408 || net == QNetworkReply::TimeoutError) {
+    failure.kind = FailureKind::Timeout;
+    failure.title = Tr("No answer in time");
+    failure.message = Tr("%1 did not answer in time.").arg(service_name);
+    failure.retryable = true;
+  }
+  else if (result.http_status >= 500 && result.http_status < 600) {
+    failure.kind = FailureKind::ServerError;
+    failure.title = Tr("Service problem");
+    failure.message = Tr("%1 reported a problem on its side. This is usually temporary.").arg(service_name);
+    failure.retryable = true;
+  }
+  else if (net == QNetworkReply::OperationCanceledError) {
+    failure.kind = FailureKind::Cancelled;
+    failure.title = Tr("Cancelled");
+    failure.message = Tr("The request was cancelled.");
+  }
+  else if (result.http_status <= 0 && net > 0 && net < 100) {
+    failure.kind = FailureKind::Offline;
+    failure.title = Tr("No connection");
+    failure.message = Tr("Adrift could not reach %1. Check your internet connection.").arg(service_name);
+    failure.retryable = true;
+  }
+  else {
+    failure.kind = FailureKind::BadResponse;
+    failure.title = Tr("Request failed");
+    failure.message = Tr("%1 could not be read right now.").arg(service_name);
+    failure.retryable = true;
+  }
+
+  failure.message += u' ' + Tr("Nothing was imported.");
+  return failure;
+
+}
+
 Importer::Importer(PageSource *source, QObject *parent)
     : QObject(parent),
       source_(source),
@@ -329,11 +418,16 @@ void Importer::RequestNext() {
 }
 
 void Importer::Fail(const QString &message) {
+  Fail(BadResponseFailure(message + u' ' + Tr("Nothing was imported.")));
+}
+
+void Importer::Fail(const Failure &failure) {
 
   // Everything read so far is discarded: a failed import never yields a partial list.
   Reset();
   SetState(State::Idle);
-  Q_EMIT Failed(message);
+  Q_EMIT FailureOccurred(failure);
+  Q_EMIT Failed(failure.message);
 
 }
 
@@ -343,15 +437,7 @@ void Importer::PageReceived(const PageResult &result) {
   if (!busy()) return;
 
   if (!result.ok) {
-    if (result.http_status == 401 || result.http_status == 403) {
-      Fail(Tr("The service rejected the request (HTTP %1). Your login may have expired, log in again in the settings.").arg(result.http_status));
-    }
-    else if (!result.error.isEmpty()) {
-      Fail(result.error);
-    }
-    else {
-      Fail(Tr("The request failed."));
-    }
+    Fail(ClassifyFailure(result, source_->service() == Service::Tidal ? u"Tidal"_s : u"Qobuz"_s));
     return;
   }
 

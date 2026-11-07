@@ -134,6 +134,8 @@ TidalService::TidalService(const SharedPtr<TaskManager> task_manager,
   oauth_->set_use_pkce(true);
 
   QObject::connect(oauth_, &OAuthenticator::AuthenticationFinished, this, &TidalService::OAuthFinished);
+  QObject::connect(oauth_, &OAuthenticator::AuthorizationUrlReady, this, &TidalService::AuthorizationLinkReady);
+  QObject::connect(oauth_, &OAuthenticator::SessionCleared, this, &TidalService::SessionChanged);
 
   // Backends
 
@@ -327,6 +329,29 @@ void TidalService::OAuthFinished(const bool success, const QString &error, const
 void TidalService::AuthorizationUrlReceived(const QUrl &url) {
 
   oauth_->ExternalAuthorizationUrlReceived(url);
+
+}
+
+bool TidalService::authorization_pending() const {
+  return oauth_->authentication_pending();
+}
+
+QUrl TidalService::pending_authorization_url() const {
+  return oauth_->pending_authorize_url();
+}
+
+void TidalService::CancelAuthorization() {
+  oauth_->CancelAuthentication();
+}
+
+void TidalService::SaveClientId(const QString &client_id) {
+
+  Settings s;
+  s.beginGroup(TidalSettings::kSettingsGroup);
+  s.setValue(TidalSettings::kClientId, client_id.trimmed());
+  s.setValue(TidalSettings::kUseCustomClientId, true);
+  s.endGroup();
+  ReloadSettings();
 
 }
 
