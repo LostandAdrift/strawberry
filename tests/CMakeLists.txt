@@ -98,6 +98,7 @@ endmacro(add_test_file)
 
 add_test_file(src/themepalette_test.cpp false)
 add_test_file(src/signalpath_test.cpp false)
+add_test_file(src/playlistimport_test.cpp false)
 add_test_file(src/utilities_test.cpp false)
 add_test_file(src/networkproxyfactory_test.cpp false)
 add_test_file(src/temporaryfile_test.cpp false)
