@@ -47,6 +47,8 @@
 #include <QPixmap>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QToolButton>
 #include <QSlider>
 #include <QString>
 #include <QStyleFactory>
@@ -362,8 +364,10 @@ TEST_F(RenderTest, SignalPathBadgesAtSeveralWidthsAndThemes) {
       // Normal width (a wide window) and compact width (a narrow window), as in the main window status row.
       layout->addWidget(StatusStrip(scene.report, 560));
       layout->addWidget(StatusStrip(scene.report, 420));
+      layout->addWidget(StatusStrip(scene.report, 300));
     }
     sheet.setFixedWidth(600);
+    sheet.setMinimumHeight(0);
     const QImage image = Render(&sheet);
     EXPECT_GT(image.height(), 400);
     Save(image, QStringLiteral("signalpath_badges_") + theme.file);
@@ -377,15 +381,22 @@ TEST_F(RenderTest, SignalPathDialog) {
     SignalPathDialog dialog;
     dialog.setPalette(PaletteFor(theme));
     dialog.SetReport(Flac16Mixer());
-    const QImage image = Render(&dialog, QSize(520, 640));
-    EXPECT_EQ(520, image.width() / static_cast<int>(image.devicePixelRatio()));
+    const QImage image = Render(&dialog);
+    EXPECT_LE(image.height() / static_cast<int>(image.devicePixelRatio()), SignalPathDialog::kMaximumPreferredHeight);
     Save(image, QStringLiteral("signalpath_dialog_") + theme.file);
   }
 
   SignalPathDialog dsp;
   dsp.setPalette(PaletteFor(Themes()[1]));
   dsp.SetReport(Mp3WithDsp());
-  Save(Render(&dsp, QSize(520, 640)), QStringLiteral("signalpath_dialog_dsp_on"));
+  Save(Render(&dsp), QStringLiteral("signalpath_dialog_dsp_on"));
+
+  // The advanced text expanded, still within the same modest height.
+  SignalPathDialog expanded;
+  expanded.setPalette(PaletteFor(Themes()[1]));
+  expanded.SetReport(Mp3WithDsp());
+  expanded.details_toggle()->setChecked(true);
+  Save(Render(&expanded), QStringLiteral("signalpath_dialog_details_expanded"));
 
 }
 

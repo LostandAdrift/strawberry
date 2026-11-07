@@ -244,13 +244,21 @@ void PlaylistManager::New(const QString &name, const SongList &songs, const QStr
 
 }
 
-bool PlaylistManager::HasSnapshot(const QString &identity) const {
+int PlaylistManager::FindSnapshotId(const QString &identity) {
+
+  if (identity.isEmpty()) return -1;
 
   for (auto it = playlists_.constBegin(); it != playlists_.constEnd(); ++it) {
-    if (it->p && it->p->special_type() == identity) return true;
+    if (it->p && it->p->special_type() == identity) return it.key();
   }
-  return false;
 
+  // Not open: a favorite playlist that was closed is kept in the backend with its identity.
+  return playlist_backend_->FindPlaylistBySpecialType(identity);
+
+}
+
+bool PlaylistManager::HasSnapshot(const QString &identity) {
+  return FindSnapshotId(identity) >= 0;
 }
 
 int PlaylistManager::ImportSnapshot(const QString &name, const QString &identity, const SongList &songs, bool *replaced) {
@@ -258,14 +266,16 @@ int PlaylistManager::ImportSnapshot(const QString &name, const QString &identity
   if (replaced) *replaced = false;
   if (identity.isEmpty() || name.isNull()) return -1;
 
-  for (auto it = playlists_.begin(); it != playlists_.end(); ++it) {
-    if (it->p && it->p->special_type() == identity) {
-      const int id = it.key();
-      it->p->Clear();
-      it->p->InsertSongsOrCollectionItems(songs);
-      if (it->name != name) Rename(id, name);
+  const int existing_id = FindSnapshotId(identity);
+  if (existing_id >= 0) {
+    // Reopen a closed snapshot instead of creating a second playlist with the same identity.
+    if (!playlists_.contains(existing_id)) Open(existing_id);
+    if (playlists_.contains(existing_id)) {
+      Data &data = playlists_[existing_id];
+      data.p->ReplaceContents(songs);
+      if (data.name != name) Rename(existing_id, name);
       if (replaced) *replaced = true;
-      return id;
+      return existing_id;
     }
   }
 

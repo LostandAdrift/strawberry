@@ -199,7 +199,8 @@ int main(int argc, char *argv[]) {
   Utilities::IncreaseFDLimit();
 #endif
 
-  QGuiApplication::setApplicationDisplayName(u"Strawberry Music Player"_s);
+  // Display name only: applicationName, organization, settings paths, MPRIS identity and the desktop file name stay as upstream for compatibility.
+  QGuiApplication::setApplicationDisplayName(u"Adrift"_s);
   QGuiApplication::setDesktopFileName(u"org.strawberrymusicplayer.strawberry"_s);
   QGuiApplication::setQuitOnLastWindowClosed(false);
 

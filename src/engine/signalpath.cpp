@@ -171,6 +171,13 @@ Report Analyze(const Source &source, const Config &config) {
   if (source.bitrate > 0 && source.lossiness != Lossiness::Lossless) report.source_rows << qMakePair(Tr("Bitrate"), Tr("%1 kbps").arg(source.bitrate));
   if (!source.origin.isEmpty()) report.source_rows << qMakePair(Tr("Origin"), source.origin);
 
+  QStringList summary;
+  if (source.bitdepth > 0) summary << Tr("%1 bit").arg(source.bitdepth);
+  if (source.samplerate > 0) summary << Tr("%1 Hz").arg(source.samplerate);
+  if (source.bitrate > 0 && source.lossiness != Lossiness::Lossless) summary << Tr("%1 kbps").arg(source.bitrate);
+  if (!source.origin.isEmpty()) summary << source.origin;
+  report.source_summary = summary.join(QStringLiteral(" · "));
+
   QStringList source_details;
   if (!depth_rate.isEmpty()) source_details << depth_rate;
   if (source.bitrate > 0 && source.lossiness != Lossiness::Lossless) source_details << Tr("%1 kbps").arg(source.bitrate);
@@ -179,7 +186,9 @@ Report Analyze(const Source &source, const Config &config) {
   // --- Software processing (only what really changes samples)
   auto add_processing = [&report](const QString &name, const bool alters, const QString &state, const QString &detail = QString()) {
     report.processing_rows << qMakePair(name, state);
+    if (!alters) report.processing_off << name;
     if (alters) {
+      report.processing_active << qMakePair(name, state);
       report.stages << Stage{ name, detail.isEmpty() ? state : detail, true };
       report.alterations << name;
     }
@@ -222,6 +231,7 @@ Report Analyze(const Source &source, const Config &config) {
   }
   report.stages << Stage{ report.output_text, config.device, false };
 
+  report.output_detail = (config.output.isEmpty() ? Tr("automatic output") : config.output) + QStringLiteral(" · ") + (config.device.isEmpty() ? Tr("default device") : config.device);
   report.output_rows << qMakePair(Tr("Output"), config.output.isEmpty() ? Tr("Automatic") : config.output);
   report.output_rows << qMakePair(Tr("Device"), config.device.isEmpty() ? Tr("Default") : config.device);
   report.output_rows << qMakePair(Tr("Path"), report.output_text);

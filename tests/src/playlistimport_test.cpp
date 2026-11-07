@@ -28,6 +28,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPalette>
 #include <QList>
 #include <QListWidget>
 #include <QMetaObject>
@@ -523,6 +524,82 @@ TEST_F(PlaylistImporterTest, RepeatedRefreshDeliversTheCompleteCurrentListEachTi
 
 }
 
+TEST_F(PlaylistImporterTest, RepeatedPageWithWrongOffsetIsRejectedWithoutASnapshot) {
+
+  // Raw counts add up to the total, but the second page claims to start at offset 0 again: a stale or repeated page.
+  source.responder = [](const bool, const QString &, const int, const int) {
+    QList<int> ids;
+    for (int i = 0; i < 100; ++i) ids << i;
+    return Ok(TidalTracksPage(ids, 0, 200));
+  };
+  importer.ImportPlaylist(Info());
+  ASSERT_TRUE(WaitFor([this]() { return !captured.failures.isEmpty() || !captured.imports.isEmpty(); }));
+
+  ASSERT_EQ(1, captured.failures.size());
+  EXPECT_TRUE(captured.failures[0].contains(QStringLiteral("unexpected page")));
+  EXPECT_TRUE(captured.imports.isEmpty());
+  EXPECT_EQ((QList<int>{ 0, 100 }), source.requested_offsets);
+  EXPECT_FALSE(importer.busy());
+
+}
+
+TEST_F(PlaylistImporterTest, RepeatedPlaylistListPageIsRejectedToo) {
+
+  source.responder = [](const bool, const QString &, const int, const int) { return Ok(TidalPlaylistsPage(0, 100, 0, 200)); };
+  importer.LoadPlaylists();
+  ASSERT_TRUE(WaitFor([this]() { return !captured.failures.isEmpty() || !captured.playlists.isEmpty(); }));
+  ASSERT_EQ(1, captured.failures.size());
+  EXPECT_TRUE(captured.playlists.isEmpty());
+
+}
+
+TEST_F(PlaylistImporterTest, PagesThatOmitTheOffsetUseTheRequestedOrder) {
+
+  source.responder = [](const bool, const QString &, const int offset, const int) {
+    QList<int> ids;
+    const int total = 150;
+    for (int i = offset; i < std::min(offset + 100, total); ++i) ids << i;
+    QJsonObject page = TidalTracksPage(ids, offset, total);
+    page.remove(QStringLiteral("offset"));
+    return Ok(page);
+  };
+  importer.ImportPlaylist(Info());
+  ASSERT_TRUE(WaitFor([this]() { return !captured.failures.isEmpty() || !captured.imports.isEmpty(); }));
+  ASSERT_EQ(1, captured.imports.size());
+  EXPECT_EQ(150, captured.imports[0].size());
+
+}
+
+TEST_F(PlaylistImporterTest, MalformedPaginationMetadataFailsCleanly) {
+
+  const QList<QJsonObject> bad_pages = {
+    Json(R"({"offset": "0", "totalNumberOfItems": 1, "items": []})"),
+    Json(R"({"offset": -5, "totalNumberOfItems": 1, "items": []})"),
+    Json(R"({"offset": 0.5, "totalNumberOfItems": 1, "items": []})"),
+    Json(R"({"offset": 0, "totalNumberOfItems": "many", "items": []})"),
+    Json(R"({"offset": 0, "totalNumberOfItems": -1, "items": []})"),
+    Json(R"({"offset": null, "items": []})"),
+    Json(R"({"offset": 0, "totalNumberOfItems": 3.7, "items": []})"),
+  };
+  for (const QJsonObject &bad : bad_pages) {
+    EXPECT_FALSE(ParsePlaylistTracks(Service::Tidal, bad).valid) << QJsonDocument(bad).toJson().toStdString();
+    EXPECT_FALSE(ParsePlaylistList(Service::Tidal, bad).valid) << QJsonDocument(bad).toJson().toStdString();
+
+    captured = Captured();
+    source.requested_offsets.clear();
+    source.responder = [bad](const bool, const QString &, const int, const int) { return Ok(bad); };
+    importer.ImportPlaylist(Info());
+    ASSERT_TRUE(WaitFor([this]() { return !captured.failures.isEmpty() || !captured.imports.isEmpty(); }));
+    EXPECT_EQ(1, captured.failures.size());
+    EXPECT_TRUE(captured.imports.isEmpty());
+  }
+
+  // The same for the Qobuz envelope.
+  EXPECT_FALSE(ParsePlaylistTracks(Service::Qobuz, Json(R"({"tracks": {"offset": "x", "total": 1, "items": []}})")).valid);
+  EXPECT_FALSE(ParsePlaylistList(Service::Qobuz, Json(R"({"playlists": {"offset": 0, "total": -2, "items": []}})")).valid);
+
+}
+
 // ------------------------------------------------------------------------------------------------------------- the dialog
 
 class PlaylistImportDialogTest : public ::testing::Test {
@@ -534,6 +611,7 @@ class PlaylistImportDialogTest : public ::testing::Test {
     entry.song_source = Song::Source::Tidal;
     entry.page_source = &source;
     entry.logged_in = [this]() { return logged_in; };
+    entry.account_key = [this]() { return account; };
     dialog.AddService(entry);
     dialog.SetSnapshotExistsFunction([this](const QString &identity) { return existing.contains(identity); });
     QObject::connect(&dialog, &PlaylistImportDialog::SnapshotReady, &dialog, [this](const QString &, const QString &identity, const QString &name, const SongList &songs, const int skipped) {
@@ -556,6 +634,7 @@ class PlaylistImportDialogTest : public ::testing::Test {
   FakeSource source;
   PlaylistImportDialog dialog;
   bool logged_in = true;
+  QString account = QStringLiteral("user-1");
   QStringList existing;
   QStringList snapshots;
   QStringList names;
@@ -651,6 +730,81 @@ TEST_F(PlaylistImportDialogTest, ClosingWhileLoadingCancels) {
   ASSERT_TRUE(dialog.loading());
   QMetaObject::invokeMethod(&dialog, "reject", Qt::DirectConnection);
   EXPECT_FALSE(dialog.loading());
+  EXPECT_EQ(1, source.cancel_calls);
+
+}
+
+TEST_F(PlaylistImportDialogTest, SwitchingAccountDiscardsTheLoadedPlaylistList) {
+
+  LoadList();
+  ASSERT_EQ(3, dialog.playlist_list()->count());
+
+  // Same account: the cached list is shown again when the dialog is reopened (showEvent re-runs the same logic).
+  QMetaObject::invokeMethod(&dialog, "ServiceChanged", Qt::DirectConnection);
+  EXPECT_EQ(3, dialog.playlist_list()->count());
+
+  // Another account signed in: the previous account's playlists must not be shown, or importable.
+  account = QStringLiteral("user-2");
+  QMetaObject::invokeMethod(&dialog, "ServiceChanged", Qt::DirectConnection);
+  EXPECT_EQ(0, dialog.playlist_list()->count());
+  EXPECT_FALSE(dialog.import_button()->isEnabled());
+  EXPECT_TRUE(dialog.status_label()->text().contains(QStringLiteral("Load playlists")));
+
+  // Loading again for the new account works, and logging out empties the list again.
+  LoadList(2);
+  EXPECT_EQ(2, dialog.playlist_list()->count());
+  logged_in = false;
+  account = QString();
+  QMetaObject::invokeMethod(&dialog, "ServiceChanged", Qt::DirectConnection);
+  EXPECT_EQ(0, dialog.playlist_list()->count());
+
+}
+
+TEST_F(PlaylistImportDialogTest, RemoteTextIsShownAsPlainText) {
+
+  source.responder = [](const bool, const QString &, const int, const int) { return HttpError(500, QStringLiteral("<b>bold</b> <a href=\"http://example.invalid\">link</a>")); };
+  dialog.load_button()->click();
+  ASSERT_TRUE(WaitFor([this]() { return !dialog.loading(); }));
+  EXPECT_EQ(Qt::PlainText, dialog.status_label()->textFormat());
+  EXPECT_TRUE(dialog.status_label()->text().contains(QStringLiteral("<b>bold</b>")));
+
+}
+
+TEST_F(PlaylistImportDialogTest, ErrorColorDoesNotStickAfterASuccessfulLoad) {
+
+  // A dialog palette with a distinctive text color, so the check cannot pass by accident.
+  QPalette pal = dialog.palette();
+  pal.setColor(QPalette::WindowText, QColor(10, 120, 30));
+  pal.setColor(QPalette::BrightText, QColor(200, 30, 30));
+  dialog.setPalette(pal);
+
+  source.responder = [](const bool, const QString &, const int, const int) { return HttpError(500, QStringLiteral("boom")); };
+  dialog.load_button()->click();
+  ASSERT_TRUE(WaitFor([this]() { return !dialog.loading(); }));
+  EXPECT_EQ(QColor(200, 30, 30), dialog.status_label()->palette().color(QPalette::WindowText));
+
+  LoadList();
+  EXPECT_EQ(QColor(10, 120, 30), dialog.status_label()->palette().color(QPalette::WindowText));
+
+}
+
+TEST(PlaylistImportDialogLifecycleTest, DestroyingTheDialogCancelsARunningRequest) {
+
+  FakeSource source;
+  source.hold = true;
+  {
+    PlaylistImportDialog dialog;
+    PlaylistImportDialog::ServiceEntry entry;
+    entry.name = QStringLiteral("Tidal");
+    entry.url_scheme = QStringLiteral("tidal");
+    entry.song_source = Song::Source::Tidal;
+    entry.page_source = &source;
+    dialog.AddService(entry);
+    dialog.load_button()->click();
+    ASSERT_TRUE(dialog.loading());
+    EXPECT_EQ(0, source.cancel_calls);
+  }
+  // Closing is not required: simply destroying the dialog stops the request.
   EXPECT_EQ(1, source.cancel_calls);
 
 }

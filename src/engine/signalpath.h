@@ -121,6 +121,12 @@ struct Report {
   Rows processing_rows;
   Rows output_rows;
 
+  // Compact summaries for the details dialog.
+  QString source_summary;       // "Lossless · 16 bit · 44100 Hz" (plus origin and bitrate when known)
+  QString output_detail;        // "pulsesink · default device"
+  Rows processing_active;       // only the stages that alter the signal, with their state
+  QStringList processing_off;   // names of stages that are off or have no effect, shown as one summary line
+
   // Plain text version of everything, for copying into bug reports.
   QString technical_text;
 

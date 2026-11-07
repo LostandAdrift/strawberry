@@ -23,27 +23,41 @@
 #include "config.h"
 
 #include <QDialog>
+#include <QSize>
 
 #include "engine/signalpath.h"
 
 class QLabel;
-class QVBoxLayout;
 class QPlainTextEdit;
 class QPushButton;
+class QScrollArea;
+class QToolButton;
+class QVBoxLayout;
 class QWidget;
 
-// Explains the current audio signal path in three sections (source, processing, output), with copyable technical text.
+// Explains the current audio signal path with a clear hierarchy: the source quality first, then the output, then only the processing
+// that actually changes the signal (everything that is off is one summary line). Technical text is collapsed and can be copied.
+// The content scrolls, so the Close button stays visible even in a small window.
 class SignalPathDialog : public QDialog {
   Q_OBJECT
 
  public:
+  // The largest height the dialog asks for, so it fits a 600 pixel high screen area with title bar and panels.
+  static constexpr int kMaximumPreferredHeight = 520;
+
   explicit SignalPathDialog(QWidget *parent = nullptr);
 
   void SetReport(const SignalPath::Report &report);
 
+  QSize sizeHint() const override;
+
   QString technical_text() const;
   QPushButton *output_settings_button() const { return output_settings_button_; }
   QPushButton *copy_button() const { return copy_button_; }
+  QPushButton *close_button() const { return close_button_; }
+  QToolButton *details_toggle() const { return details_toggle_; }
+  QPlainTextEdit *technical_view() const { return technical_; }
+  QScrollArea *scroll_area() const { return scroll_; }
 
  Q_SIGNALS:
   // The user asked to open the output (Backend) settings.
@@ -51,19 +65,23 @@ class SignalPathDialog : public QDialog {
 
  private Q_SLOTS:
   void CopyDetails();
+  void SetDetailsExpanded(const bool expanded);
 
  private:
-  QWidget *BuildSection(const QString &title, const SignalPath::Report::Rows &rows);
-
-  QVBoxLayout *sections_layout_;
-  QLabel *label_dsp_;
+  QScrollArea *scroll_;
+  QLabel *label_source_;
+  QLabel *label_tier_;
+  QLabel *label_source_summary_;
   QLabel *label_output_;
+  QLabel *label_output_detail_;
+  QLabel *label_processing_;
+  QLabel *label_processing_detail_;
   QLabel *label_caveats_;
+  QToolButton *details_toggle_;
   QPlainTextEdit *technical_;
   QPushButton *copy_button_;
   QPushButton *output_settings_button_;
   QPushButton *close_button_;
-  QList<QWidget*> section_widgets_;
 };
 
 #endif  // SIGNALPATHDIALOG_H

@@ -156,6 +156,25 @@ PlaylistBackend::PlaylistList PlaylistBackend::GetPlaylists(const GetPlaylistsFl
 
 }
 
+int PlaylistBackend::FindPlaylistBySpecialType(const QString &special_type) {
+
+  if (special_type.isEmpty()) return -1;
+
+  QMutexLocker l(database_->Mutex());
+  QSqlDatabase db(database_->Connect());
+
+  SqlQuery q(db);
+  q.prepare(u"SELECT ROWID FROM playlists WHERE special_type = :special_type ORDER BY ROWID LIMIT 1"_s);
+  q.BindValue(u":special_type"_s, special_type);
+  if (!q.Exec()) {
+    database_->ReportErrors(q);
+    return -1;
+  }
+
+  return q.next() ? q.value(0).toInt() : -1;
+
+}
+
 PlaylistBackend::Playlist PlaylistBackend::GetPlaylist(const int id) {
 
   QMutexLocker l(database_->Mutex());

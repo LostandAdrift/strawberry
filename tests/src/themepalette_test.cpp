@@ -121,6 +121,15 @@ TEST(ThemePaletteTest, AdriftDarkMeetsContrastTargets) {
   EXPECT_GE(ContrastRatio(c.value(QPalette::BrightText), c.value(QPalette::Window)), 4.5);
   EXPECT_GE(ContrastRatio(c.value(QPalette::PlaceholderText), c.value(QPalette::Base)), 3.0);
 
+  // The accent is warm (champagne/copper), not the stock cold blue, and stays readable on every surface it is used on.
+  const QColor accent = c.value(QPalette::Highlight);
+  EXPECT_GT(accent.red(), accent.blue() + 40);
+  EXPECT_GE(ContrastRatio(accent, c.value(QPalette::Base)), 7.0);
+  EXPECT_GE(ContrastRatio(accent, c.value(QPalette::Window)), 7.0);
+  EXPECT_GE(ContrastRatio(c.value(QPalette::Link), c.value(QPalette::Base)), 7.0);
+  // Surfaces stay neutral ink: no strong blue cast.
+  EXPECT_LT(c.value(QPalette::Window).blue() - c.value(QPalette::Window).red(), 8);
+
 }
 
 TEST(ThemePaletteTest, PaletteFromOmarchyColors) {

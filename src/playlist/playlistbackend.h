@@ -73,6 +73,8 @@ class PlaylistBackend : public QObject {
   PlaylistList GetAllOpenPlaylists();
   PlaylistList GetAllFavoritePlaylists();
   PlaylistBackend::Playlist GetPlaylist(const int id);
+  // Returns the id of the first stored playlist (open or closed favorite) with this special type, or -1.
+  int FindPlaylistBySpecialType(const QString &special_type);
 
   PlaylistItemPtrList GetPlaylistItems(const int playlist_id);
   SongList GetPlaylistSongs(const int playlist_id);

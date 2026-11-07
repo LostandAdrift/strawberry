@@ -98,13 +98,34 @@ Track ParseQobuzTrack(const QJsonObject &item) {
 
 }
 
+// Reads offset, total and raw size. Returns false for malformed metadata (wrong type, negative or fractional numbers), which makes the whole page invalid.
 template<typename T>
-void ParseEnvelope(const QJsonObject &container, const QString &total_key, Page<T> &page) {
+bool ParseEnvelope(const QJsonObject &container, const QString &total_key, Page<T> &page) {
 
-  page.valid = true;
-  page.offset = container["offset"_L1].toInt();
-  page.total = container.contains(total_key) ? container[total_key].toInt() : -1;
+  auto whole_number = [](const QJsonValue &value, int *out) {
+    if (!value.isDouble()) return false;
+    const double number = value.toDouble();
+    if (number < 0 || number > 2147483647.0 || number != static_cast<double>(static_cast<qint64>(number))) return false;
+    *out = static_cast<int>(number);
+    return true;
+  };
+
+  if (container.contains("offset"_L1)) {
+    int offset = 0;
+    if (!whole_number(container["offset"_L1], &offset)) return false;
+    page.offset = offset;
+    page.has_offset = true;
+  }
+
+  if (container.contains(total_key)) {
+    int total = 0;
+    if (!whole_number(container[total_key], &total)) return false;
+    page.total = total;
+  }
+
   page.raw_count = static_cast<int>(container["items"_L1].toArray().size());
+  page.valid = true;
+  return true;
 
 }
 
@@ -119,7 +140,7 @@ Page<PlaylistInfo> ParsePlaylistList(const Service service, const QJsonObject &j
   const QJsonObject container = service == Service::Qobuz ? json["playlists"_L1].toObject() : json;
   if (!container["items"_L1].isArray()) return page;
 
-  ParseEnvelope(container, service == Service::Qobuz ? u"total"_s : u"totalNumberOfItems"_s, page);
+  if (!ParseEnvelope(container, service == Service::Qobuz ? u"total"_s : u"totalNumberOfItems"_s, page)) return Page<PlaylistInfo>();
 
   const QJsonArray items = container["items"_L1].toArray();
   for (const QJsonValue &value : items) {
@@ -154,7 +175,7 @@ Page<Track> ParsePlaylistTracks(const Service service, const QJsonObject &json) 
   const QJsonObject container = service == Service::Qobuz ? json["tracks"_L1].toObject() : json;
   if (!container["items"_L1].isArray()) return page;
 
-  ParseEnvelope(container, service == Service::Qobuz ? u"total"_s : u"totalNumberOfItems"_s, page);
+  if (!ParseEnvelope(container, service == Service::Qobuz ? u"total"_s : u"totalNumberOfItems"_s, page)) return Page<Track>();
 
   const QJsonArray items = container["items"_L1].toArray();
   for (const QJsonValue &value : items) {
@@ -337,6 +358,8 @@ void Importer::PageReceived(const PageResult &result) {
   const Service service = source_->service();
   int raw_count = 0;
   int total = -1;
+  bool has_offset = false;
+  int page_offset = 0;
 
   if (state_ == State::LoadingPlaylists) {
     const Page<PlaylistInfo> page = ParsePlaylistList(service, result.json);
@@ -346,6 +369,8 @@ void Importer::PageReceived(const PageResult &result) {
     }
     raw_count = page.raw_count;
     total = page.total;
+    has_offset = page.has_offset;
+    page_offset = page.offset;
     playlists_ << page.items;
   }
   else {
@@ -356,7 +381,16 @@ void Importer::PageReceived(const PageResult &result) {
     }
     raw_count = page.raw_count;
     total = page.total;
+    has_offset = page.has_offset;
+    page_offset = page.offset;
     tracks_ << page.items;
+  }
+
+  // A page that states its offset must be the page that was asked for.
+  // A repeated or stale page would otherwise add the same entries twice.
+  if (has_offset && page_offset != paginator_.offset()) {
+    Fail(Tr("The service returned an unexpected page. Please try again."));
+    return;
   }
 
   // The total must stay the same while paging, otherwise the list changed under us and pages may overlap or skip entries.

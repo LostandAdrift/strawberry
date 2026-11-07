@@ -23,19 +23,16 @@
 
 #include <QAbstractButton>
 #include <QColor>
-#include <QCoreApplication>
 #include <QEvent>
 #include <QFont>
 #include <QFontMetrics>
 #include <QPainter>
-#include <QPainterPath>
 #include <QPaintEvent>
 #include <QPalette>
+#include <QPen>
 #include <QRect>
 #include <QRectF>
 #include <QSize>
-#include <QStyle>
-#include <QStyleOptionFocusRect>
 #include <QString>
 
 #include "signalpathwidget.h"
@@ -90,33 +87,72 @@ void SignalPathWidget::Clear() {
 
 }
 
-int SignalPathWidget::HorizontalPadding() const {
-  return std::max(8, fontMetrics().height() / 2);
+int SignalPathWidget::Padding() const {
+  return std::max(8, fontMetrics().height() * 2 / 3);
 }
 
 int SignalPathWidget::DotDiameter() const {
   return std::max(8, fontMetrics().height() / 2);
 }
 
-int SignalPathWidget::ChipWidth() const {
-  if (!has_report_) return 0;
-  // Measured with the bold font so the chip has the same size whether or not app DSP is on and its text never overflows.
-  QFont bold = font();
-  bold.setBold(true);
-  return QFontMetrics(bold).horizontalAdvance(report_.dsp_text) + HorizontalPadding() * 2;
+// Visible space between the source, the output and the chip.
+int SignalPathWidget::Gap() const {
+  return std::max(10, fontMetrics().height() * 3 / 4);
 }
 
-int SignalPathWidget::MainTextAvailableWidth() const {
+int SignalPathWidget::TextWidth(const QString &text) const {
+  return fontMetrics().horizontalAdvance(text);
+}
 
-  const int fixed = HorizontalPadding() + DotDiameter() + HorizontalPadding() + HorizontalPadding() + ChipWidth() + HorizontalPadding() / 2;
-  return std::max(0, width() - fixed);
+int SignalPathWidget::ChipWidth() const {
+
+  if (!has_report_) return 0;
+  // Measured with the bold font so the chip has the same size whether or not app DSP is on, and its text never overflows.
+  QFont bold = font();
+  bold.setBold(true);
+  return QFontMetrics(bold).horizontalAdvance(report_.dsp_text) + Padding() * 2;
+
+}
+
+// Space taken to the left of the text: padding, quality marker, padding.
+int SignalPathWidget::LeftEdge() const {
+  return Padding() + DotDiameter() + Padding() * 3 / 4;
+}
+
+SignalPathWidget::Layout SignalPathWidget::ComputeLayout(const int width) const {
+
+  Layout layout;
+  if (!has_report_) return layout;
+
+  const int available = std::max(0, width - LeftEdge() - Padding());
+  const int source_width = TextWidth(report_.source_text);
+  const QString output = report_.output_text;
+  const int output_width = TextWidth(output);
+  const int chip = ChipWidth();
+  const int gap = Gap();
+
+  // Preferred: source, output and chip. Drop the secondary parts one at a time, chip first.
+  if (source_width + gap + output_width + gap + chip <= available && source_width + gap + output_width <= kMaximumTextWidth) {
+    layout.source = report_.source_text;
+    layout.output = output;
+    layout.show_chip = true;
+    return layout;
+  }
+  if (source_width + gap + output_width <= available && source_width + gap + output_width <= kMaximumTextWidth) {
+    layout.source = report_.source_text;
+    layout.output = output;
+    return layout;
+  }
+  layout.source = fontMetrics().elidedText(report_.source_text, Qt::ElideRight, std::min(available, kMaximumTextWidth));
+  return layout;
 
 }
 
 QString SignalPathWidget::ElidedMainText() const {
 
-  if (!has_report_) return QString();
-  return fontMetrics().elidedText(report_.badge, Qt::ElideRight, MainTextAvailableWidth());
+  const Layout layout = ComputeLayout(width());
+  if (layout.output.isEmpty()) return layout.source;
+  return layout.source + QStringLiteral(" · ") + layout.output;
 
 }
 
@@ -124,18 +160,17 @@ QSize SignalPathWidget::sizeHint() const {
 
   if (!has_report_) return QSize(0, 0);
   const QFontMetrics fm = fontMetrics();
-  const int text_width = std::min(fm.horizontalAdvance(report_.badge), kMaximumTextWidth);
-  const int width = HorizontalPadding() + DotDiameter() + HorizontalPadding() + text_width + HorizontalPadding() + ChipWidth() + HorizontalPadding() / 2;
-  return QSize(width, fm.height() + 10);
+  const int text = std::min(TextWidth(report_.source_text) + Gap() + TextWidth(report_.output_text), kMaximumTextWidth);
+  return QSize(LeftEdge() + text + Gap() + ChipWidth() + Padding(), fm.height() + 10);
 
 }
 
 QSize SignalPathWidget::minimumSizeHint() const {
 
   if (!has_report_) return QSize(0, 0);
-  const QFontMetrics fm = fontMetrics();
-  const int width = HorizontalPadding() + DotDiameter() + HorizontalPadding() + kMinimumTextWidth + HorizontalPadding() + ChipWidth() + HorizontalPadding() / 2;
-  return QSize(width, fm.height() + 10);
+  // The smallest size still shows the whole source (up to a cap), because that is the part that matters.
+  const int source = std::min(TextWidth(report_.source_text), kMaximumSourceWidth);
+  return QSize(LeftEdge() + source + Padding(), fontMetrics().height() + 10);
 
 }
 
@@ -155,15 +190,14 @@ void SignalPathWidget::paintEvent(QPaintEvent *e) {
   p.setRenderHint(QPainter::Antialiasing);
 
   const QPalette &pal = palette();
-  const bool enabled = isEnabled();
   const QColor window = pal.color(QPalette::Window);
-  const QColor text = pal.color(enabled ? QPalette::Active : QPalette::Disabled, QPalette::WindowText);
+  const QColor text = pal.color(isEnabled() ? QPalette::Active : QPalette::Disabled, QPalette::WindowText);
   const QColor highlight = pal.color(QPalette::Highlight);
 
   // The pill is a subtle lift from the window color; text keeps the full contrast of WindowText on Window.
   QColor fill = Mix(window, text, 0.07);
   if (underMouse() || isDown()) fill = Mix(window, text, 0.14);
-  const QColor border = Mix(window, text, hasFocus() ? 0.55 : 0.22);
+  const QColor border = Mix(window, text, 0.22);
 
   const QRectF pill = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
   const qreal radius = pill.height() / 2.0;
@@ -171,7 +205,7 @@ void SignalPathWidget::paintEvent(QPaintEvent *e) {
   p.setBrush(fill);
   p.drawRoundedRect(pill, radius, radius);
 
-  const int pad = HorizontalPadding();
+  const int pad = Padding();
   const int dot = DotDiameter();
 
   // Quality marker: filled for lossless/hi-res/DSD, ring for lossy, dotted ring for unknown. The text carries the same information.
@@ -188,23 +222,36 @@ void SignalPathWidget::paintEvent(QPaintEvent *e) {
   }
   p.drawEllipse(dot_rect.adjusted(1, 1, -1, -1));
 
-  // Main text (elided)
-  const int text_left = pad + dot + pad;
-  const int chip_width = ChipWidth();
-  const QRect text_rect(text_left, 0, std::max(0, width() - text_left - chip_width - pad / 2 - pad), height());
-  p.setPen(text);
-  p.drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, fontMetrics().elidedText(report_.badge, Qt::ElideRight, text_rect.width()));
+  const Layout layout = ComputeLayout(width());
+  const QFontMetrics fm = fontMetrics();
+  int x = LeftEdge();
 
-  // DSP chip. When app DSP is on it uses the accent so it is noticeable; the words still say it, color is not the only cue.
-  const QRectF chip(width() - chip_width - pad / 2.0, 3, chip_width, height() - 6);
-  QColor chip_fill = report_.app_dsp_active ? Mix(window, highlight, 0.30) : Mix(window, text, 0.05);
-  p.setPen(Qt::NoPen);
-  p.setBrush(chip_fill);
-  p.drawRoundedRect(chip, chip.height() / 2.0, chip.height() / 2.0);
-  QFont chip_font = font();
-  chip_font.setBold(report_.app_dsp_active);
-  p.setFont(chip_font);
-  p.setPen(report_.app_dsp_active ? text : Mix(window, text, 0.8));
-  p.drawText(chip, Qt::AlignCenter, report_.dsp_text);
+  // Source: full contrast.
+  p.setPen(text);
+  const QRect source_rect(x, 0, TextWidth(layout.source), height());
+  p.drawText(source_rect, Qt::AlignVCenter | Qt::AlignLeft, layout.source);
+  x += source_rect.width();
+
+  // Output: secondary, slightly muted but still well above AA contrast (mix is mostly text color).
+  if (!layout.output.isEmpty()) {
+    x += Gap();
+    p.setPen(Mix(window, text, 0.78));
+    p.drawText(QRect(x, 0, fm.horizontalAdvance(layout.output), height()), Qt::AlignVCenter | Qt::AlignLeft, layout.output);
+    x += fm.horizontalAdvance(layout.output);
+  }
+
+  // DSP chip, right aligned. When app DSP is on it uses the accent; the words still say it, color is not the only cue.
+  if (layout.show_chip) {
+    const int chip_width = ChipWidth();
+    const QRectF chip(width() - chip_width - pad / 2.0, 3, chip_width, height() - 6);
+    p.setPen(Qt::NoPen);
+    p.setBrush(report_.app_dsp_active ? Mix(window, highlight, 0.30) : Mix(window, text, 0.05));
+    p.drawRoundedRect(chip, chip.height() / 2.0, chip.height() / 2.0);
+    QFont chip_font = font();
+    chip_font.setBold(report_.app_dsp_active);
+    p.setFont(chip_font);
+    p.setPen(report_.app_dsp_active ? text : Mix(window, text, 0.8));
+    p.drawText(chip, Qt::AlignCenter, report_.dsp_text);
+  }
 
 }

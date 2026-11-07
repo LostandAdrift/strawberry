@@ -2382,6 +2382,13 @@ int Playlist::IndexByUuId(const QUuid &uuid) const {
 
 }
 
+void Playlist::ReplaceContents(const SongList &songs) {
+
+  Clear();
+  InsertSongsOrCollectionItems(songs);
+
+}
+
 void Playlist::Clear() {
 
   // If loading songs from session restore async, don't insert them

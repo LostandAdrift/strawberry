@@ -316,27 +316,108 @@ TEST_F(PlaylistTest, InsertItems) {
 
 }
 
-TEST_F(PlaylistTest, ReplacingContentsKeepsOrderAndRepeatedTracks) {
+namespace {
 
-  // A refreshed streaming-playlist snapshot is "Clear(), then insert the complete remote list" (PlaylistManager::ImportSnapshot).
-  // The result must be exactly the new list, in order, with repeated tracks kept and nothing left over from the old contents.
-  playlist_.InsertItems(PlaylistItemPtrList() << MakeMockItemP(u"A"_s) << MakeMockItemP(u"B"_s) << MakeMockItemP(u"A"_s));
-  ASSERT_EQ(3, playlist_.rowCount(QModelIndex()));
+Song SnapshotSong(const QString &id) {
+  Song song(Song::Source::Tidal);
+  song.Init(QStringLiteral("Title %1").arg(id), QStringLiteral("Artist"), QStringLiteral("Album"), 200);
+  song.set_song_id(id);
+  song.set_url(QUrl(QStringLiteral("tidal:") + id));
+  return song;
+}
 
-  playlist_.Clear();
-  EXPECT_EQ(0, playlist_.rowCount(QModelIndex()));
+SongList SnapshotSongs(const QStringList &ids) {
+  SongList songs;
+  for (const QString &id : ids) songs << SnapshotSong(id);
+  return songs;
+}
 
-  playlist_.InsertItems(PlaylistItemPtrList() << MakeMockItemP(u"C"_s) << MakeMockItemP(u"A"_s) << MakeMockItemP(u"A"_s) << MakeMockItemP(u"B"_s));
-  ASSERT_EQ(4, playlist_.rowCount(QModelIndex()));
-  const QStringList expected = { u"C"_s, u"A"_s, u"A"_s, u"B"_s };
-  for (int row = 0; row < expected.size(); ++row) {
-    EXPECT_EQ(expected[row], playlist_.data(playlist_.index(row, static_cast<int>(Playlist::Column::Title)))) << row;
+}  // namespace
+
+// The user flow behind "refresh snapshot": a streaming playlist was imported earlier, favorited and closed, the application was restarted, and the
+// remote list changed. The stored playlist must be found by its remote identity (not duplicated), refreshed with the complete new list in order with
+// repeated tracks, while a manual playlist next to it stays untouched.
+TEST_F(PlaylistTest, SnapshotIdentityIsFoundAfterCloseAndRefreshReplacesStoredItems) {
+
+  QTemporaryDir temp_dir;
+  ASSERT_TRUE(temp_dir.isValid());
+  SharedPtr<Database> database = std::make_shared<Database>(nullptr, nullptr, temp_dir.filePath(u"strawberry.db"_s));
+  SharedPtr<PlaylistBackend> backend = std::make_shared<PlaylistBackend>(database, tagreader_client_, nullptr);
+
+  const QString identity = u"tidal:pl-1"_s;
+
+  // A manual playlist with its own items, and an unrelated imported snapshot of another remote playlist.
+  const int manual_id = backend->CreatePlaylist(u"My mix"_s, QString());
+  ASSERT_NE(-1, manual_id);
+  backend->SavePlaylist(manual_id, PlaylistItemSaveDataList() << MakeStreamItem(u"Manual1"_s)->CreateSaveData() << MakeStreamItem(u"Manual2"_s)->CreateSaveData(), -1, nullptr);
+  const int other_id = backend->CreatePlaylist(u"Tidal: Other"_s, u"tidal:pl-2"_s);
+  ASSERT_NE(-1, other_id);
+
+  // Nothing yet: no identity found.
+  EXPECT_EQ(-1, backend->FindPlaylistBySpecialType(identity));
+  EXPECT_EQ(-1, backend->FindPlaylistBySpecialType(QString()));
+
+  // First import: the snapshot is created with its identity and saved.
+  const int snapshot_id = backend->CreatePlaylist(u"Tidal: Night"_s, identity);
+  ASSERT_NE(-1, snapshot_id);
+  {
+    Playlist playlist(nullptr, nullptr, backend, nullptr, tagreader_client_, snapshot_id, identity);
+    WaitForRestoreFinished(&playlist);
+    playlist.ReplaceContents(SnapshotSongs({ u"1"_s, u"2"_s, u"1"_s }));
+    playlist.SavePending();
+    QCoreApplication::processEvents();
   }
 
-  // Refreshing again with the same list does not append.
-  playlist_.Clear();
-  playlist_.InsertItems(PlaylistItemPtrList() << MakeMockItemP(u"C"_s) << MakeMockItemP(u"A"_s) << MakeMockItemP(u"A"_s) << MakeMockItemP(u"B"_s));
-  EXPECT_EQ(4, playlist_.rowCount(QModelIndex()));
+  // The user favorites it, so closing the playlist keeps it in the backend (a non-favorite would be removed).
+  backend->FavoritePlaylist(snapshot_id, true);
+
+  // "Restart": the identity is found in the backend although no playlist object is open.
+  EXPECT_EQ(snapshot_id, backend->FindPlaylistBySpecialType(identity));
+  ASSERT_EQ(3, backend->GetPlaylistItems(snapshot_id).count());
+
+  // Refresh: reopen the stored playlist and replace its contents immediately, while the restore of the old items is still running.
+  {
+    Playlist playlist(nullptr, nullptr, backend, nullptr, tagreader_client_, snapshot_id, identity, true);
+    ASSERT_TRUE(playlist.is_restoring());
+    QSignalSpy restore_done(&playlist, &Playlist::RestoreDone);
+    playlist.ReplaceContents(SnapshotSongs({ u"3"_s, u"1"_s, u"1"_s, u"2"_s }));
+    // The restore was cancelled by the replacement, so it ends with RestoreDone (RestoreFinished is only for completed restores).
+    if (playlist.is_restoring()) ASSERT_TRUE(restore_done.wait(5000));
+
+    // The cancelled restore must not bring the old items back.
+    ASSERT_EQ(4, playlist.rowCount(QModelIndex()));
+    playlist.SavePending();
+    QCoreApplication::processEvents();
+  }
+
+  const PlaylistItemPtrList refreshed = backend->GetPlaylistItems(snapshot_id);
+  ASSERT_EQ(4, refreshed.count());
+  QStringList ids;
+  for (const PlaylistItemPtr &item : refreshed) ids << item->OriginalMetadata().song_id();
+  EXPECT_EQ(u"3,1,1,2"_s, ids.join(u','));
+
+  // Still one playlist with that identity, found again, and the other playlists were not touched.
+  EXPECT_EQ(snapshot_id, backend->FindPlaylistBySpecialType(identity));
+  int with_identity = 0;
+  const PlaylistBackend::PlaylistList all = backend->GetAllPlaylists();
+  for (const PlaylistBackend::Playlist &stored : all) {
+    if (stored.special_type == identity) ++with_identity;
+  }
+  EXPECT_EQ(1, with_identity);
+
+  const PlaylistItemPtrList manual = backend->GetPlaylistItems(manual_id);
+  ASSERT_EQ(2, manual.count());
+  EXPECT_EQ(u"Manual1"_s, manual.at(0)->OriginalMetadata().title());
+  EXPECT_EQ(u"Manual2"_s, manual.at(1)->OriginalMetadata().title());
+  EXPECT_EQ(other_id, backend->FindPlaylistBySpecialType(u"tidal:pl-2"_s));
+  EXPECT_EQ(0, backend->GetPlaylistItems(other_id).count());
+
+  // A closed playlist that is not a favorite is removed by the manager, and its identity is gone with it.
+  backend->FavoritePlaylist(snapshot_id, false);
+  backend->RemovePlaylist(snapshot_id);
+  EXPECT_EQ(-1, backend->FindPlaylistBySpecialType(identity));
+
+  database->Close();
 
 }
 

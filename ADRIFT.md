@@ -11,7 +11,7 @@ Internal names (settings, binary, D-Bus, file formats) are unchanged so the fork
 
 ### Color themes (Settings → Appearance → Colors → Color theme)
 
-- **Adrift Dark** (the default on a fresh install): a deep blue-black theme with warm off-white text and one luminous accent. Text roles are above 7:1 contrast against their backgrounds.
+- **Adrift Dark** (the default on a fresh install): neutral ink surfaces, warm off-white text and one restrained champagne-copper accent. Text and the accent are above 7:1 contrast against their backgrounds. It only sets palette colors; there is no global stylesheet, so controls keep their normal style.
 - **System**: the Qt/desktop colors, unchanged. Installs that already saved an explicit color choice (system or a custom color set) keep it; only installs with no saved choice get Adrift Dark.
 - **Omarchy colors (read when Adrift starts)**: uses the colors of the current Omarchy theme. Adrift reads `$XDG_STATE_HOME/omarchy/current/theme/colors.toml` (default `~/.local/state/omarchy/...`) and falls back to the older `~/.config/omarchy/current/theme/colors.toml`. The file is parsed as plain data with a small built-in parser; nothing from it is ever executed. It understands the flat `key = "#rrggbb"` layout (`background`, `foreground`, `accent`, `darker_background`, `lighter_background`, `color0`–`color15`, …).
   Text roles are corrected to at least 4.5:1 contrast (WCAG AA) against their backgrounds, so a low-contrast theme stays readable.
@@ -24,7 +24,7 @@ Some Qt styles (for example Breeze) ignore palettes; use the Fusion style for fu
 
 ### Audio signal path badge and details
 
-While a track plays, a small badge in the status row shows the source and the output, for example `FLAC 16/44.1 · System mixer` with a separate chip `App DSP off` or `App DSP on`. Two things are kept apart on purpose:
+While a track plays, a small badge in the status row shows the source first, then the output, then a separate chip: for example `FLAC 16/44.1   System mixer   App DSP off`. Two things are kept apart on purpose:
 
 - **App DSP** answers only "does Adrift itself change the samples?" It is on if the software volume is below 100% (or muted), or ReplayGain, loudness normalization, the equalizer, stereo balance, crossfeed, a forced channel count or fades are active. With volume control disabled the engine has no volume stage, so the volume level and mute do not count.
 - **The output** is described separately: `Direct ALSA`, `ALSA plugin`, `System mixer` (PulseAudio/PipeWire), `Auto output`, or the sink name. A sound server mixes and may resample, so `App DSP off` never reads as an all-clear.
@@ -33,7 +33,9 @@ The badge never claims "bit-perfect". Adrift cannot see what a sound server, dri
 
 The source comes from the track's own metadata (codec, bit depth, sample rate). Hi-Res is only claimed for lossless sources reporting more than 16 bit or more than 48 kHz; a lossy file with a "24 bit" tag is still lossy. Until a stream's metadata arrives the source stays `Source unknown` instead of being guessed.
 
-The badge is a real button (keyboard focusable, Space/Enter to activate, accessible name and description). Long text is elided so a long tag cannot widen the window. Click it to open the **Audio signal path** dialog with Source, Processing and Output sections, the caveats that apply, copyable technical text ("Copy details"), and an "Output settings…" button that opens the Backend settings.
+When space is short the badge drops its secondary parts first: the `App DSP` chip, then the output label. The source (codec, bit depth, sample rate) is kept in full and only elided when even it does not fit; a long tag can never widen the window. The tooltip and the dialog always have the full picture.
+
+The badge is a real button (keyboard focusable, Space/Enter to activate, accessible name and description). Click it to open the **Audio signal path** dialog: the source quality first, the output, then the processing. Only processing that is actually active is listed; everything that is off is one summary line. Technical text is collapsed under "Technical details" and **Copy details** copies it either way. The content scrolls, so the buttons stay reachable in a small window, and **Output settings…** opens the Backend settings.
 
 ### Import streaming playlists (Tools → Import streaming playlists…)
 
@@ -43,10 +45,10 @@ A read-only importer for **Tidal** and **Qobuz** playlists, using the login you 
 2. Select a playlist and press **Import**. Adrift reads all its tracks and creates a local playlist named `Tidal: <name>`, in the remote order, keeping repeated tracks. Tracks the service marks unavailable are left out and counted.
 3. Importing the same playlist again (the button then reads **Refresh snapshot**) replaces the contents of that local snapshot with the current remote list. It is a refresh, not a two-way sync: nothing is ever written to the service, and your own manually built playlists are never touched.
 
-The remote identity (`tidal:<playlist id>`) is stored with the local playlist, so a refresh finds its snapshot after a restart. If you closed the snapshot playlist, the next import creates a new one.
-The dialog shows loading (with progress and a Cancel button), empty, and error states. Controls are disabled while loading, and closing the dialog cancels the request. If anything goes wrong (network error, expired login, malformed reply, a list that changes while being read, or too many pages) nothing is imported and the existing snapshot is left as it was.
+The remote identity (`tidal:<playlist id>`) is stored with the local playlist, so a refresh finds its snapshot after a restart. A snapshot that you favorited and then closed is still found: it is reopened and refreshed, not duplicated. (Closing a playlist that is not a favorite deletes it, as everywhere in the player, and the next import creates a new one.)
+The dialog shows loading (with progress and a Cancel button), empty, and error states. Controls are disabled while loading, and closing the dialog cancels the request. Pages must arrive in order: a page that states an offset different from the one requested, malformed paging numbers, a list that changes while being read, a short list, or too many pages all stop the import. So do network errors and expired logins. In every such case nothing is imported and the existing snapshot is left as it was. If you sign in to a different account, the previously loaded list is discarded when the dialog is reopened.
 
-Limits: this uses the services' playlist endpoints for the signed-in user (`users/{id}/playlists` and `playlists/{id}/items` for Tidal, `playlist/getUserPlaylists` and `playlist/get` for Qobuz). Their availability for your account and the token's permissions could only be exercised with mocked replies in the tests; a live check with a real account is still needed. Tidal "favorite" playlists that you did not create are not listed.
+Limits: this uses the services' playlist endpoints for the signed-in user (`users/{id}/playlists` and `playlists/{id}/items` for Tidal, `playlist/getUserPlaylists` and `playlist/get` for Qobuz). These are the private APIs the player already uses for these services; no official endorsement or stability is implied. Their availability for your account and the token's permissions are exercised in the tests with mocked replies only, so a live check with a real account is still needed. Exactly which playlists are listed: for Tidal, the playlists **you created** (`users/{id}/playlists`), not playlists you only follow or favorited; for Qobuz, what `playlist/getUserPlaylists` returns for the account.
 
 ### Direct ALSA setup (Settings → Backend, with an ALSA output)
 
@@ -86,4 +88,4 @@ New tests: `themepalette_test`, `signalpath_test`, `signalpathwidget_test`, `pla
 - The Omarchy theme is not live-updated (see above).
 - Tidal/Qobuz import has not been run against a live account in this repository's tests.
 - Sample-rate/bit-depth of streamed tracks is only shown when the service reports it; otherwise the source shows as unknown.
-- Not rebranded (name, icon, desktop file) so the fork stays easy to merge with upstream.
+- Branding is modest: the window and application display name is "Adrift". The internal application name, organization, settings and database paths, MPRIS identity, desktop file name and binary stay `strawberry`/`Strawberry`, so the fork stays compatible with an installed Strawberry and easy to merge with upstream. Upstream credits and license are unchanged. There is no Adrift icon or packaging yet.

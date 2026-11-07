@@ -31,8 +31,11 @@
 class QPaintEvent;
 class QEvent;
 
-// A compact, clickable badge that summarizes the audio signal path, for example "FLAC 16/44.1 · System mixer   App DSP off".
-// The source/output text is elided when space is short, so long tags never force the window wider.
+// A compact, clickable badge that summarizes the audio signal path, for example "FLAC 16/44.1   System mixer   App DSP off".
+//
+// The source (codec, bit depth, sample rate) is the most important part and is kept as long as possible.
+// When the widget is narrow, the secondary parts are dropped first: the "App DSP" chip, then the output label, and only then is the source text elided.
+// The full details are always in the tooltip and the details dialog. A long tag can never widen the window.
 // The widget is a real button: keyboard focusable, activated with Space/Enter, and exposes an accessible name and description.
 class SignalPathWidget : public QAbstractButton {
   Q_OBJECT
@@ -40,8 +43,15 @@ class SignalPathWidget : public QAbstractButton {
  public:
   explicit SignalPathWidget(QWidget *parent = nullptr);
 
-  static constexpr int kMaximumTextWidth = 280;
-  static constexpr int kMinimumTextWidth = 90;
+  // The text and the parts that are shown at a given width.
+  struct Layout {
+    QString source;   // elided only when even the source alone does not fit
+    QString output;   // empty when dropped
+    bool show_chip = false;
+  };
+
+  static constexpr int kMaximumTextWidth = 260;  // cap for source + output text, whatever the tags say
+  static constexpr int kMaximumSourceWidth = 150;  // the source text is never wider than this in the minimum size
 
   void SetReport(const SignalPath::Report &report);
   // Hides the badge when nothing is playing.
@@ -50,7 +60,9 @@ class SignalPathWidget : public QAbstractButton {
   const SignalPath::Report &report() const { return report_; }
   bool has_report() const { return has_report_; }
 
-  // The text actually drawn for the main part after eliding at the current width.
+  // What would be drawn at the given widget width.
+  Layout ComputeLayout(const int width) const;
+  // The text actually drawn for the main part at the current width: the source, then the output if it fits.
   QString ElidedMainText() const;
 
   QSize sizeHint() const override;
@@ -61,10 +73,12 @@ class SignalPathWidget : public QAbstractButton {
   void changeEvent(QEvent *e) override;
 
  private:
-  int ChipWidth() const;
+  int Padding() const;
   int DotDiameter() const;
-  int HorizontalPadding() const;
-  int MainTextAvailableWidth() const;
+  int Gap() const;
+  int ChipWidth() const;
+  int LeftEdge() const;
+  int TextWidth(const QString &text) const;
 
   SignalPath::Report report_;
   bool has_report_;

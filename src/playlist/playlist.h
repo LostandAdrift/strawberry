@@ -323,6 +323,8 @@ class Playlist : public QAbstractListModel {
   void UpdateItems(SongList songs);
 
   void Clear();
+  // Replaces the whole contents with the given songs, in order and keeping repeated songs. A restore that is still running is cancelled so it cannot add the old items back.
+  void ReplaceContents(const SongList &songs);
   void RemoveDuplicateSongs();
   void RemoveUnavailableSongs();
   void Shuffle();

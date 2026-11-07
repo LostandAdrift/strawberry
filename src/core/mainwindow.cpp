@@ -1753,6 +1753,7 @@ void MainWindow::ShowPlaylistImportDialog() {
       entry.song_source = Song::Source::Tidal;
       entry.page_source = new TidalPlaylistSource(&*tidal, app_->network(), dialog);
       entry.logged_in = [tidal]() { return tidal->authenticated(); };
+      entry.account_key = [tidal]() { return tidal->authenticated() ? QString::number(tidal->user_id()) : QString(); };
       dialog->AddService(entry);
     }
 #endif
@@ -1764,6 +1765,7 @@ void MainWindow::ShowPlaylistImportDialog() {
       entry.song_source = Song::Source::Qobuz;
       entry.page_source = new QobuzPlaylistSource(&*qobuz, app_->network(), dialog);
       entry.logged_in = [qobuz]() { return qobuz->authenticated(); };
+      entry.account_key = [qobuz]() { return qobuz->authenticated() ? QString::number(qobuz->user_id()) : QString(); };
       dialog->AddService(entry);
     }
 #endif

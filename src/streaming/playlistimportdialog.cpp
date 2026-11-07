@@ -29,6 +29,7 @@
 #include <QListWidgetItem>
 #include <QPalette>
 #include <QProgressBar>
+#include <QShowEvent>
 #include <QPushButton>
 #include <QVBoxLayout>
 
@@ -69,6 +70,9 @@ PlaylistImportDialog::PlaylistImportDialog(QWidget *parent)
   setWindowTitle(tr("Import streaming playlists"));
   setMinimumSize(460, 420);
 
+  // Remote names and server error text must never be interpreted as rich text.
+  label_info_->setTextFormat(Qt::PlainText);
+  label_status_->setTextFormat(Qt::PlainText);
   label_info_->setWordWrap(true);
   label_info_->setText(tr("Adrift reads your playlists and creates a local copy. Nothing is changed on the streaming service. Importing again replaces that local copy with the current remote list; it is a refresh, not a two-way sync."));
 
@@ -113,6 +117,17 @@ PlaylistImportDialog::PlaylistImportDialog(QWidget *parent)
 
 }
 
+PlaylistImportDialog::~PlaylistImportDialog() {
+
+  // Stop any request that is still running before the services (and the objects they point to) go away.
+  for (Service *service : std::as_const(services_)) {
+    if (service->importer->busy()) service->importer->Cancel();
+  }
+  qDeleteAll(services_);
+  services_.clear();
+
+}
+
 QString PlaylistImportDialog::Identity(const QString &url_scheme, const QString &playlist_id) {
   return url_scheme + u':' + playlist_id;
 }
@@ -124,6 +139,7 @@ void PlaylistImportDialog::AddService(const ServiceEntry &entry) {
   Service *service = new Service;
   service->entry = entry;
   service->importer = new PlaylistImport::Importer(entry.page_source, this);
+  service->account_key = entry.account_key ? entry.account_key() : QString();
   services_ << service;
 
   PlaylistImport::Importer *importer = service->importer;
@@ -150,9 +166,15 @@ void PlaylistImportDialog::SetStatus(const QString &text, const bool error) {
 
   label_status_->setText(text);
   // Errors are announced in words ("Error:") and not only by color.
-  QPalette pal = label_status_->palette();
-  pal.setColor(QPalette::WindowText, error ? pal.color(QPalette::BrightText) : pal.color(QPalette::WindowText));
-  label_status_->setPalette(pal);
+  // Non-errors use the dialog's own palette again, so a previous error color never sticks.
+  if (error) {
+    QPalette pal = palette();
+    pal.setColor(QPalette::WindowText, pal.color(QPalette::BrightText));
+    label_status_->setPalette(pal);
+  }
+  else {
+    label_status_->setPalette(QPalette());
+  }
 
 }
 
@@ -179,10 +201,33 @@ void PlaylistImportDialog::UpdateControls() {
 
 }
 
+bool PlaylistImportDialog::DiscardIfAccountChanged(Service *service) {
+
+  if (!service) return false;
+  const QString key = service->entry.account_key ? service->entry.account_key() : QString();
+  if (key == service->account_key) return false;
+
+  service->account_key = key;
+  service->loaded = false;
+  service->playlists.clear();
+  if (service == current_service()) list_->clear();
+  return true;
+
+}
+
+void PlaylistImportDialog::showEvent(QShowEvent *e) {
+
+  QDialog::showEvent(e);
+  // The dialog is reused. If the user logged out or into another account meanwhile, do not show the old account's playlists.
+  if (!loading_ && current_service()) ServiceChanged();
+
+}
+
 void PlaylistImportDialog::ServiceChanged() {
 
-  list_->clear();
   Service *service = current_service();
+  DiscardIfAccountChanged(service);
+  list_->clear();
   if (!service) {
     SetStatus(tr("No streaming service is available."));
   }
@@ -203,6 +248,7 @@ void PlaylistImportDialog::LoadPlaylists() {
 
   Service *service = current_service();
   if (!service || loading_) return;
+  DiscardIfAccountChanged(service);
   list_->clear();
   service->loaded = false;
   service->importer->LoadPlaylists();

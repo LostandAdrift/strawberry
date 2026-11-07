@@ -67,7 +67,8 @@ struct Page {
   QList<T> items;
   int raw_count = 0;  // Number of entries the server returned, before any filtering. Pagination uses this, not items.size().
   int offset = 0;
-  int total = -1;  // -1 if the service did not report a total
+  bool has_offset = false;  // true only if the response stated its offset explicitly
+  int total = -1;           // -1 if the service did not report a total
   bool valid = false;
 };
 

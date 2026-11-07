@@ -36,6 +36,7 @@ class QLabel;
 class QListWidget;
 class QListWidgetItem;
 class QProgressBar;
+class QShowEvent;
 class QPushButton;
 
 // Native dialog to read the user's streaming playlists and import them as local snapshots.
@@ -50,9 +51,12 @@ class PlaylistImportDialog : public QDialog {
     Song::Source song_source = Song::Source::Unknown;
     PlaylistImport::PageSource *page_source = nullptr;  // owned by the caller (dialog parent)
     std::function<bool()> logged_in;
+    // Identifies the signed-in account (for example the user id). When it changes, the cached playlist list of that service is discarded.
+    std::function<QString()> account_key;
   };
 
   explicit PlaylistImportDialog(QWidget *parent = nullptr);
+  ~PlaylistImportDialog() override;
 
   void AddService(const ServiceEntry &entry);
   // Used to label the button "Import" or "Refresh snapshot".
@@ -79,6 +83,7 @@ class PlaylistImportDialog : public QDialog {
 
  protected:
   void reject() override;
+  void showEvent(QShowEvent *e) override;
 
  private Q_SLOTS:
   void ServiceChanged();
@@ -99,9 +104,12 @@ class PlaylistImportDialog : public QDialog {
     PlaylistImport::Importer *importer = nullptr;
     QList<PlaylistImport::PlaylistInfo> playlists;
     bool loaded = false;
+    QString account_key;
   };
 
   Service *current_service();
+  // Drops the cached playlists of a service if the signed-in account changed since they were loaded. Returns true if it did.
+  bool DiscardIfAccountChanged(Service *service);
   void SetStatus(const QString &text, const bool error = false);
   void UpdateControls();
 

@@ -263,23 +263,23 @@ QColor EnsureContrast(const QColor &foreground, const QColor &background, const 
 
 const QMap<QPalette::ColorRole, QColor> &AdriftDarkColors() {
 
-  // Deep blue-black surfaces with a warm paper-white text and a single luminous accent.
-  // Text on Window is ~14:1, accent on Base is ~7:1, HighlightedText on Highlight is above 7:1.
+  // Neutral ink surfaces with a hint of warmth, paper-white text and one restrained champagne-copper accent.
+  // Text on Window is above 12:1, the accent on Base is above 8:1, HighlightedText on Highlight is above 8:1.
   static const QMap<QPalette::ColorRole, QColor> colors = {
-    { QPalette::Window, QColor(0x14, 0x17, 0x1f) },
-    { QPalette::WindowText, QColor(0xe8, 0xe6, 0xe1) },
-    { QPalette::Base, QColor(0x0e, 0x10, 0x16) },
-    { QPalette::AlternateBase, QColor(0x18, 0x1c, 0x26) },
-    { QPalette::Text, QColor(0xe8, 0xe6, 0xe1) },
-    { QPalette::Button, QColor(0x22, 0x27, 0x33) },
-    { QPalette::ButtonText, QColor(0xe8, 0xe6, 0xe1) },
-    { QPalette::BrightText, QColor(0xff, 0x8a, 0x8a) },
-    { QPalette::PlaceholderText, QColor(0x8a, 0x91, 0xa3) },
-    { QPalette::ToolTipBase, QColor(0x22, 0x27, 0x33) },
-    { QPalette::ToolTipText, QColor(0xe8, 0xe6, 0xe1) },
-    { QPalette::Highlight, QColor(0x7f, 0xb4, 0xff) },
-    { QPalette::HighlightedText, QColor(0x0b, 0x0e, 0x14) },
-    { QPalette::Link, QColor(0x8f, 0xc1, 0xff) }
+    { QPalette::Window, QColor(0x15, 0x15, 0x18) },
+    { QPalette::WindowText, QColor(0xec, 0xe8, 0xe0) },
+    { QPalette::Base, QColor(0x0f, 0x0f, 0x12) },
+    { QPalette::AlternateBase, QColor(0x1a, 0x1a, 0x1f) },
+    { QPalette::Text, QColor(0xec, 0xe8, 0xe0) },
+    { QPalette::Button, QColor(0x25, 0x25, 0x2b) },
+    { QPalette::ButtonText, QColor(0xec, 0xe8, 0xe0) },
+    { QPalette::BrightText, QColor(0xff, 0x8f, 0x7d) },
+    { QPalette::PlaceholderText, QColor(0x96, 0x91, 0x8a) },
+    { QPalette::ToolTipBase, QColor(0x25, 0x25, 0x2b) },
+    { QPalette::ToolTipText, QColor(0xec, 0xe8, 0xe0) },
+    { QPalette::Highlight, QColor(0xd9, 0xa8, 0x6a) },
+    { QPalette::HighlightedText, QColor(0x17, 0x12, 0x0a) },
+    { QPalette::Link, QColor(0xe6, 0xb9, 0x7e) }
   };
   return colors;
 

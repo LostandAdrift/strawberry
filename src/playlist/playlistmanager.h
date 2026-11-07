@@ -84,7 +84,9 @@ class PlaylistManager : public PlaylistManagerInterface {
   // `identity` (for example "tidal:<uuid>") is stored as the playlist's special type and identifies the remote playlist across restarts.
   // Order and repeated tracks are kept as given. Returns the playlist id, and sets `replaced` to whether an existing snapshot was replaced.
   // Only snapshots that are currently open can be found; if the user closed one, a new snapshot is created.
-  bool HasSnapshot(const QString &identity) const;
+  bool HasSnapshot(const QString &identity);
+  // The id of the playlist holding this snapshot identity: an open playlist, or a stored (favorite) playlist that is currently closed. -1 if none.
+  int FindSnapshotId(const QString &identity);
   int ImportSnapshot(const QString &name, const QString &identity, const SongList &songs, bool *replaced = nullptr);
 
   QItemSelection selection(const int id) const override;
