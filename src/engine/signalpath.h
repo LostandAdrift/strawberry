@@ -21,6 +21,7 @@
 #define SIGNALPATH_H
 
 #include <QList>
+#include <QPair>
 #include <QString>
 #include <QStringList>
 
@@ -55,6 +56,7 @@ struct Source {
   int bitdepth = 0;    // Bits per sample, 0 if not reported.
   int samplerate = 0;  // Hz, 0 if not reported.
   int bitrate = 0;     // kbps, 0 if not reported.
+  QString origin;      // Streaming service name for remote tracks, empty for local files.
 };
 
 enum class OutputKind {
@@ -96,12 +98,31 @@ struct Report {
   QStringList alterations;  // Names of stages that alter the samples.
   QStringList caveats;      // Things Adrift cannot verify.
 
-  // Short badge text, e.g. "FLAC 24/96 · Hi-Res".
+  // Short parts for the compact badge. These are separate so the UI can style and elide them independently.
+  QString source_text;  // "FLAC 24/96", or "Source unknown" until metadata arrives
+  QString output_text;  // "Direct ALSA", "System mixer", "ALSA plugin", "Auto output"
+  QString dsp_text;     // "App DSP off" or "App DSP on"
+  bool app_dsp_active = false;
+
+  // "FLAC 24/96 · System mixer" - source and output only. App DSP is reported separately so it is not confused with output certainty.
   QString badge;
-  // One-line verdict, e.g. "Software processing: ReplayGain, Equalizer" or "No software processing configured (not verified end to end)".
+  // Statement about the application's own processing only, e.g. "App DSP off" / "Altered by: ReplayGain".
+  QString dsp_verdict;
+  // Statement about what is and is not known about the output.
+  QString output_verdict;
+  // dsp_verdict and output_verdict in one line (for status text and accessibility).
   QString verdict;
-  // Multi-line description for tooltips and accessibility.
+  // Multi-line description for tooltips.
   QString description;
+
+  // Sections for the details dialog: label / value rows.
+  using Rows = QList<QPair<QString, QString>>;
+  Rows source_rows;
+  Rows processing_rows;
+  Rows output_rows;
+
+  // Plain text version of everything, for copying into bug reports.
+  QString technical_text;
 
   bool unaltered_configuration() const { return alterations.isEmpty(); }
 };

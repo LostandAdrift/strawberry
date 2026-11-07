@@ -94,6 +94,13 @@ QString ThemeToString(const Theme theme) {
 
 }
 
+Theme ResolveTheme(const QString &stored_theme, const bool has_explicit_color_choice) {
+
+  if (!stored_theme.isEmpty()) return ThemeFromString(stored_theme);
+  return has_explicit_color_choice ? Theme::System : Theme::AdriftDark;
+
+}
+
 Theme ThemeFromString(const QString &value) {
 
   if (value.compare("adrift-dark"_L1, Qt::CaseInsensitive) == 0) return Theme::AdriftDark;
@@ -145,17 +152,28 @@ QStringList OmarchyColorsCandidates(const QString &home_dir) {
 
   const QString home = home_dir.isEmpty() ? QDir::homePath() : home_dir;
 
-  QStringList config_dirs;
+  QStringList dirs;
+  auto add_dir = [&dirs](const QString &dir) {
+    if (!dirs.contains(dir)) dirs << dir;
+  };
+
+  // Current Omarchy keeps the active theme in the XDG state directory.
   if (home_dir.isEmpty()) {
-    const QString xdg = qEnvironmentVariable("XDG_CONFIG_HOME");
-    if (!xdg.isEmpty() && QDir::isAbsolutePath(xdg)) config_dirs << xdg;
+    const QString xdg_state = qEnvironmentVariable("XDG_STATE_HOME");
+    if (!xdg_state.isEmpty() && QDir::isAbsolutePath(xdg_state)) add_dir(xdg_state);
   }
-  config_dirs << home + "/.config"_L1;
+  add_dir(home + "/.local/state"_L1);
+
+  // Older installations used the config directory.
+  if (home_dir.isEmpty()) {
+    const QString xdg_config = qEnvironmentVariable("XDG_CONFIG_HOME");
+    if (!xdg_config.isEmpty() && QDir::isAbsolutePath(xdg_config)) add_dir(xdg_config);
+  }
+  add_dir(home + "/.config"_L1);
 
   QStringList candidates;
-  for (const QString &dir : std::as_const(config_dirs)) {
-    const QString path = dir + "/omarchy/current/theme/colors.toml"_L1;
-    if (!candidates.contains(path)) candidates << path;
+  for (const QString &dir : std::as_const(dirs)) {
+    candidates << dir + "/omarchy/current/theme/colors.toml"_L1;
   }
   return candidates;
 
@@ -168,9 +186,50 @@ QMap<QString, QColor> LoadOmarchyColors(const QStringList &candidates) {
     if (!file.open(QIODevice::ReadOnly)) continue;
     if (file.size() > kMaxThemeFileSize) continue;
     const QMap<QString, QColor> colors = ParseColorsToml(file.readAll());
-    if (!colors.isEmpty()) return colors;
+    if (!PaletteFromOmarchyColors(colors).isEmpty()) return colors;
   }
   return QMap<QString, QColor>();
+
+}
+
+namespace {
+
+bool IsTextRole(const QPalette::ColorRole role) {
+  return role == QPalette::WindowText || role == QPalette::Text || role == QPalette::ButtonText || role == QPalette::BrightText || role == QPalette::PlaceholderText || role == QPalette::ToolTipText || role == QPalette::HighlightedText;
+}
+
+QPalette::ColorRole BackgroundForTextRole(const QPalette::ColorRole role) {
+
+  switch (role) {
+    case QPalette::Text:
+    case QPalette::PlaceholderText: return QPalette::Base;
+    case QPalette::ButtonText:      return QPalette::Button;
+    case QPalette::ToolTipText:     return QPalette::ToolTipBase;
+    case QPalette::HighlightedText: return QPalette::Highlight;
+    default:                        return QPalette::Window;
+  }
+
+}
+
+}  // namespace
+
+QPalette BuildPalette(const QPalette &base, const QMap<QPalette::ColorRole, QColor> &colors) {
+
+  QPalette palette = base;
+  for (auto it = colors.constBegin(); it != colors.constEnd(); ++it) {
+    if (!it.value().isValid()) continue;
+    palette.setColor(QPalette::Active, it.key(), it.value());
+    palette.setColor(QPalette::Inactive, it.key(), it.value());
+    if (!IsTextRole(it.key())) palette.setColor(QPalette::Disabled, it.key(), it.value());
+  }
+
+  // Dim text roles in the disabled group by blending towards their (new) background.
+  for (auto it = colors.constBegin(); it != colors.constEnd(); ++it) {
+    if (it.value().isValid() && IsTextRole(it.key())) {
+      palette.setColor(QPalette::Disabled, it.key(), Blend(it.value(), palette.color(QPalette::Disabled, BackgroundForTextRole(it.key())), 0.5));
+    }
+  }
+  return palette;
 
 }
 
@@ -238,9 +297,12 @@ QMap<QPalette::ColorRole, QColor> PaletteFromOmarchyColors(const QMap<QString, Q
   if (!danger.isValid()) danger = QColor(0xff, 0x8a, 0x8a);
 
   const QColor window = background;
-  const QColor base = Blend(background, Qt::black, 0.18);
+  // Real Omarchy themes provide darker_background and lighter_background; derive them otherwise.
+  const QColor darker = Pick(colors, { u"darker_background"_s });
+  const QColor lighter = Pick(colors, { u"lighter_background"_s });
+  const QColor base = darker.isValid() ? darker : Blend(background, Qt::black, 0.18);
   const QColor alternate_base = Blend(background, foreground, 0.05);
-  const QColor button = Blend(background, foreground, 0.10);
+  const QColor button = lighter.isValid() ? lighter : Blend(background, foreground, 0.10);
 
   const QColor text = EnsureContrast(foreground, base, kTextContrast);
   const QColor window_text = EnsureContrast(foreground, window, kTextContrast);

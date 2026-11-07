@@ -316,6 +316,30 @@ TEST_F(PlaylistTest, InsertItems) {
 
 }
 
+TEST_F(PlaylistTest, ReplacingContentsKeepsOrderAndRepeatedTracks) {
+
+  // A refreshed streaming-playlist snapshot is "Clear(), then insert the complete remote list" (PlaylistManager::ImportSnapshot).
+  // The result must be exactly the new list, in order, with repeated tracks kept and nothing left over from the old contents.
+  playlist_.InsertItems(PlaylistItemPtrList() << MakeMockItemP(u"A"_s) << MakeMockItemP(u"B"_s) << MakeMockItemP(u"A"_s));
+  ASSERT_EQ(3, playlist_.rowCount(QModelIndex()));
+
+  playlist_.Clear();
+  EXPECT_EQ(0, playlist_.rowCount(QModelIndex()));
+
+  playlist_.InsertItems(PlaylistItemPtrList() << MakeMockItemP(u"C"_s) << MakeMockItemP(u"A"_s) << MakeMockItemP(u"A"_s) << MakeMockItemP(u"B"_s));
+  ASSERT_EQ(4, playlist_.rowCount(QModelIndex()));
+  const QStringList expected = { u"C"_s, u"A"_s, u"A"_s, u"B"_s };
+  for (int row = 0; row < expected.size(); ++row) {
+    EXPECT_EQ(expected[row], playlist_.data(playlist_.index(row, static_cast<int>(Playlist::Column::Title)))) << row;
+  }
+
+  // Refreshing again with the same list does not append.
+  playlist_.Clear();
+  playlist_.InsertItems(PlaylistItemPtrList() << MakeMockItemP(u"C"_s) << MakeMockItemP(u"A"_s) << MakeMockItemP(u"A"_s) << MakeMockItemP(u"B"_s));
+  EXPECT_EQ(4, playlist_.rowCount(QModelIndex()));
+
+}
+
 TEST_F(PlaylistTest, Indexes) {
 
   playlist_.InsertItems(PlaylistItemPtrList() << MakeMockItemP(u"One"_s) << MakeMockItemP(u"Two"_s) << MakeMockItemP(u"Three"_s));

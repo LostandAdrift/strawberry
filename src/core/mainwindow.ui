@@ -385,26 +385,7 @@
                     </widget>
                    </item>
                    <item>
-                    <widget class="QLabel" name="label_signal_path">
-                     <property name="sizePolicy">
-                      <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
-                       <horstretch>0</horstretch>
-                       <verstretch>0</verstretch>
-                      </sizepolicy>
-                     </property>
-                     <property name="focusPolicy">
-                      <enum>Qt::TabFocus</enum>
-                     </property>
-                     <property name="accessibleName">
-                      <string>Audio signal path</string>
-                     </property>
-                     <property name="text">
-                      <string/>
-                     </property>
-                     <property name="textInteractionFlags">
-                      <set>Qt::TextSelectableByMouse</set>
-                     </property>
-                    </widget>
+                    <widget class="SignalPathWidget" name="signal_path_widget" native="true"/>
                    </item>
                    <item>
                     <widget class="Line" name="line_5">
@@ -539,6 +520,7 @@
     <addaction name="action_cover_manager"/>
     <addaction name="action_equalizer"/>
     <addaction name="action_transcoder"/>
+    <addaction name="action_import_streaming_playlists"/>
     <addaction name="separator"/>
     <addaction name="action_update_collection"/>
     <addaction name="action_full_collection_scan"/>
@@ -554,6 +536,14 @@
    <addaction name="menu_tools"/>
    <addaction name="menu_help"/>
   </widget>
+  <action name="action_import_streaming_playlists">
+   <property name="text">
+    <string>Import streaming &amp;playlists…</string>
+   </property>
+   <property name="toolTip">
+    <string>Read your Tidal or Qobuz playlists and import them as local playlists</string>
+   </property>
+  </action>
   <action name="action_previous_track">
    <property name="text">
     <string>Previous track</string>
@@ -900,6 +890,11 @@
  </widget>
  <layoutdefault spacing="6" margin="11"/>
  <customwidgets>
+  <customwidget>
+   <class>SignalPathWidget</class>
+   <extends>QWidget</extends>
+   <header>widgets/signalpathwidget.h</header>
+  </customwidget>
   <customwidget>
    <class>VolumeSlider</class>
    <extends>QSlider</extends>

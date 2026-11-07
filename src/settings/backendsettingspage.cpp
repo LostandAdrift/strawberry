@@ -29,6 +29,8 @@
 #include <QString>
 #include <QRegularExpression>
 #include <QFontMetrics>
+#include <QPushButton>
+#include <QLayout>
 #include <QAbstractItemView>
 #include <QListView>
 #include <QGroupBox>
@@ -43,6 +45,7 @@
 
 #include "constants/backendsettings.h"
 #include "core/iconloader.h"
+#include "dialogs/directalsadialog.h"
 #include "core/logging.h"
 #include "core/settings.h"
 #include "core/player.h"
@@ -82,6 +85,8 @@ BackendSettingsPage::BackendSettingsPage(SettingsDialog *dialog, const SharedPtr
       ui_(new Ui_BackendSettingsPage),
       player_(player),
       audio_device_listers_(audio_device_listers),
+      button_direct_alsa_(nullptr),
+      clear_direct_alsa_backup_(false),
       configloaded_(false) {
 
   ui_->setupUi(this);
@@ -99,6 +104,11 @@ BackendSettingsPage::BackendSettingsPage(SettingsDialog *dialog, const SharedPtr
   QObject::connect(ui_->radiobutton_alsa_hw, &QRadioButton::clicked, this, &BackendSettingsPage::radiobutton_alsa_hw_clicked);
   QObject::connect(ui_->radiobutton_alsa_plughw, &QRadioButton::clicked, this, &BackendSettingsPage::radiobutton_alsa_plughw_clicked);
   QObject::connect(ui_->radiobutton_alsa_pcm, &QRadioButton::clicked, this, &BackendSettingsPage::radiobutton_alsa_pcm_clicked);
+
+  button_direct_alsa_ = new QPushButton(tr("Direct ALSA setup…"), ui_->widget_alsa_plugin);
+  button_direct_alsa_->setToolTip(tr("Guided setup for sending audio straight to a hardware device with Adrift processing off"));
+  ui_->layout_alsa_plugin->addWidget(button_direct_alsa_);
+  QObject::connect(button_direct_alsa_, &QPushButton::clicked, this, &BackendSettingsPage::ShowDirectAlsaDialog);
 #endif
   QObject::connect(ui_->stickyslider_replaygainpreamp, &StickySlider::valueChanged, this, &BackendSettingsPage::RgPreampChanged);
   QObject::connect(ui_->stickyslider_replaygainfallbackgain, &StickySlider::valueChanged, this, &BackendSettingsPage::RgFallbackGainChanged);
@@ -466,7 +476,110 @@ void BackendSettingsPage::Save() {
   s.setValue(kFadeoutDuration, ui_->spinbox_fadeduration->value());
   s.setValue(kFadeoutPauseDuration, ui_->spinbox_fadeduration_pauseresume->value());
 
+  // Keep the backup made by the Direct ALSA helper until the user restores it.
+  if (!pending_direct_alsa_backup_.isEmpty()) s.setValue(kDirectAlsaBackup, pending_direct_alsa_backup_);
+  if (clear_direct_alsa_backup_) s.remove(kDirectAlsaBackup);
+  pending_direct_alsa_backup_.clear();
+  clear_direct_alsa_backup_ = false;
+
   s.endGroup();
+
+}
+
+DirectAlsa::Settings BackendSettingsPage::CollectDirectAlsaSettings() const {
+
+  DirectAlsa::Settings settings;
+
+  if (ui_->combobox_output->currentIndex() >= 0 && !ui_->combobox_output->currentText().isEmpty()) {
+    settings.output = ui_->combobox_output->itemData(ui_->combobox_output->currentIndex()).value<EngineBase::OutputDetails>().name;
+  }
+  if (ui_->combobox_device->currentText() == QLatin1String(kOutputCustom)) settings.device = ui_->lineedit_device->text();
+  else settings.device = ui_->combobox_device->itemData(ui_->combobox_device->currentIndex()).toString();
+
+  settings.replaygain = ui_->radiobutton_replaygain->isChecked();
+  settings.ebur128 = ui_->radiobutton_ebur128_loudness_normalization->isChecked();
+  settings.bs2b = ui_->checkbox_bs2b->isChecked();
+  settings.channels_forced = ui_->checkbox_channels->isChecked();
+  settings.fadeout = ui_->checkbox_fadeout_stop->isChecked();
+  settings.crossfade = ui_->checkbox_fadeout_cross->isChecked();
+  settings.autocrossfade = ui_->checkbox_fadeout_auto->isChecked();
+  settings.fadeout_pause = ui_->checkbox_fadeout_pauseresume->isChecked();
+  return settings;
+
+}
+
+void BackendSettingsPage::ApplyDirectAlsaSettings(const DirectAlsa::Settings &settings) {
+
+  // Only the page widgets are changed here. Nothing is saved or applied to the engine until the user confirms the Settings dialog.
+  for (int i = 0; i < ui_->combobox_output->count(); ++i) {
+    if (ui_->combobox_output->itemData(i).value<EngineBase::OutputDetails>().name == settings.output) {
+      ui_->combobox_output->setCurrentIndex(i);
+      break;
+    }
+  }
+
+#ifdef HAVE_ALSA
+  if (DirectAlsa::IsHardwareDevice(settings.device)) {
+    ui_->radiobutton_alsa_hw->setChecked(true);
+    SwitchALSADevices(ALSAPluginType::HW);
+  }
+#endif
+  SelectDevice(settings.device);
+
+  // The normalization options are mutually exclusive radio buttons: switch to the matching one.
+  if (settings.replaygain) ui_->radiobutton_replaygain->setChecked(true);
+  else if (settings.ebur128) ui_->radiobutton_ebur128_loudness_normalization->setChecked(true);
+  else ui_->radiobutton_no_audio_normalization->setChecked(true);
+  ui_->checkbox_bs2b->setChecked(settings.bs2b);
+  ui_->checkbox_channels->setChecked(settings.channels_forced);
+  ui_->checkbox_fadeout_stop->setChecked(settings.fadeout);
+  ui_->checkbox_fadeout_cross->setChecked(settings.crossfade);
+  ui_->checkbox_fadeout_auto->setChecked(settings.autocrossfade);
+  ui_->checkbox_fadeout_pauseresume->setChecked(settings.fadeout_pause);
+
+  set_changed();
+
+}
+
+void BackendSettingsPage::ShowDirectAlsaDialog() {
+
+  QList<QPair<QString, QString>> devices;
+  const QList<AudioDeviceLister*> listers = audio_device_listers_->ListListers();
+  for (AudioDeviceLister *lister : listers) {
+    if (!lister->outputs().contains(u"alsasink"_s)) continue;
+    const EngineDeviceList engine_devices = lister->ListDevices();
+    for (const EngineDevice &device : engine_devices) {
+      if (device.value.metaType().id() == QMetaType::QString) devices << qMakePair(device.description, device.value.toString());
+    }
+  }
+
+  const DirectAlsa::Settings current = CollectDirectAlsaSettings();
+
+  Settings s;
+  s.beginGroup(kSettingsGroup);
+  bool backup_ok = false;
+  const DirectAlsa::Settings backup = DirectAlsa::BackupFromJson(s.value(kDirectAlsaBackup).toString(), &backup_ok);
+  s.endGroup();
+
+  const QStringList warnings = DirectAlsa::Warnings(ui_->checkbox_volume_control->isChecked(), static_cast<int>(player_->engine()->volume()), player_->engine()->IsEqualizerEnabled(), player_->engine()->IsStereoBalancerEnabled());
+
+  DirectAlsaDialog dialog(devices, current, warnings, backup_ok || !pending_direct_alsa_backup_.isEmpty(), this);
+  QObject::connect(&dialog, &DirectAlsaDialog::ApplyRequested, this, [this](const DirectAlsa::Plan &plan) {
+    // Remember what the settings were before the first application, so repeated use cannot overwrite the original values.
+    if (pending_direct_alsa_backup_.isEmpty()) pending_direct_alsa_backup_ = DirectAlsa::BackupToJson(plan.before);
+    clear_direct_alsa_backup_ = false;
+    ApplyDirectAlsaSettings(plan.after);
+  });
+  QObject::connect(&dialog, &DirectAlsaDialog::RestoreRequested, this, [this, backup, backup_ok]() {
+    bool ok = backup_ok;
+    DirectAlsa::Settings restore = backup;
+    if (!pending_direct_alsa_backup_.isEmpty()) restore = DirectAlsa::BackupFromJson(pending_direct_alsa_backup_, &ok);
+    if (!ok) return;
+    ApplyDirectAlsaSettings(restore);
+    pending_direct_alsa_backup_.clear();
+    clear_direct_alsa_backup_ = true;
+  });
+  dialog.exec();
 
 }
 

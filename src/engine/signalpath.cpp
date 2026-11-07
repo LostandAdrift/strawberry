@@ -119,6 +119,18 @@ Source SourceFromSong(const Song &song) {
     default: break;
   }
 
+  switch (song.source()) {
+    case Song::Source::LocalFile:
+    case Song::Source::Collection:
+    case Song::Source::CDDA:
+    case Song::Source::Device:
+    case Song::Source::Unknown:
+      break;
+    default:
+      source.origin = song.TextForSource();
+      break;
+  }
+
   // Tracker/chip formats are synthesized, not recorded: report them without a quality claim.
   return source;
 
@@ -142,50 +154,79 @@ Report Analyze(const Source &source, const Config &config) {
   report.tier = TierForSource(source);
   report.output_kind = ClassifyOutput(config.output, config.device);
 
-  // Source and decoder
   const QString depth_rate = FormatDepthRate(source.bitdepth, source.samplerate);
+  const bool source_known = !source.format.isEmpty() && source.format != "Stream"_L1;
+
+  // --- Source
+  QStringList source_parts;
+  if (source_known) source_parts << source.format;
+  if (!depth_rate.isEmpty()) source_parts << depth_rate;
+  // Metadata can lag behind stream negotiation: stay "unknown" instead of guessing.
+  report.source_text = source_parts.isEmpty() ? Tr("Source unknown") : source_parts.join(u' ');
+
+  report.source_rows << qMakePair(Tr("Format"), source_known ? source.format : Tr("Unknown"));
+  report.source_rows << qMakePair(Tr("Quality"), TierText(report.tier));
+  report.source_rows << qMakePair(Tr("Bit depth"), source.bitdepth > 0 ? Tr("%1 bit").arg(source.bitdepth) : Tr("Not reported"));
+  report.source_rows << qMakePair(Tr("Sample rate"), source.samplerate > 0 ? Tr("%1 Hz").arg(source.samplerate) : Tr("Not reported"));
+  if (source.bitrate > 0 && source.lossiness != Lossiness::Lossless) report.source_rows << qMakePair(Tr("Bitrate"), Tr("%1 kbps").arg(source.bitrate));
+  if (!source.origin.isEmpty()) report.source_rows << qMakePair(Tr("Origin"), source.origin);
+
   QStringList source_details;
   if (!depth_rate.isEmpty()) source_details << depth_rate;
   if (source.bitrate > 0 && source.lossiness != Lossiness::Lossless) source_details << Tr("%1 kbps").arg(source.bitrate);
-  report.stages << Stage{ source.format.isEmpty() ? Tr("Source") : Tr("Source: %1").arg(source.format), source_details.join(u" · "_s), false };
+  report.stages << Stage{ source_known ? Tr("Source: %1").arg(source.format) : Tr("Source"), source_details.join(u" · "_s), false };
 
-  // Software processing
-  auto add_alteration = [&report](const QString &name, const QString &detail) {
-    report.stages << Stage{ name, detail, true };
-    report.alterations << name;
+  // --- Software processing (only what really changes samples)
+  auto add_processing = [&report](const QString &name, const bool alters, const QString &state, const QString &detail = QString()) {
+    report.processing_rows << qMakePair(name, state);
+    if (alters) {
+      report.stages << Stage{ name, detail.isEmpty() ? state : detail, true };
+      report.alterations << name;
+    }
   };
 
-  if (config.volume_control) {
-    if (config.muted) {
-      add_alteration(Tr("Volume"), Tr("Muted"));
-    }
-    else if (config.volume_percent < 100) {
-      add_alteration(Tr("Volume"), Tr("Attenuated to %1%").arg(config.volume_percent));
-    }
-    else {
-      report.stages << Stage{ Tr("Volume"), Tr("100%, unity gain"), false };
-    }
+  // Mute and volume only act through the engine's volume element, which exists only when volume control is enabled.
+  // With volume control off, the volume slider and mute do nothing, so neither can alter the signal.
+  if (!config.volume_control) {
+    add_processing(Tr("Volume"), false, Tr("Off (volume control disabled, mute has no effect)"));
   }
-  if (config.replaygain) add_alteration(Tr("ReplayGain"), Tr("Gain applied"));
-  if (config.ebur128) add_alteration(Tr("Loudness normalization"), Tr("EBU R 128 gain applied"));
-  if (config.equalizer) add_alteration(Tr("Equalizer"), Tr("Enabled"));
-  if (config.stereo_balancer) add_alteration(Tr("Stereo balance"), Tr("Enabled"));
-  if (config.bs2b) add_alteration(Tr("Crossfeed"), Tr("Headphone crossfeed enabled"));
-  if (config.channels_forced) add_alteration(Tr("Channel remix"), Tr("Output channel count is forced"));
-  if (config.fade_or_crossfade) add_alteration(Tr("Fade / crossfade"), Tr("Applied at track changes"));
+  else if (config.muted) {
+    add_processing(Tr("Volume"), true, Tr("Muted"));
+  }
+  else if (config.volume_percent < 100) {
+    add_processing(Tr("Volume"), true, Tr("Attenuated to %1%").arg(config.volume_percent));
+  }
+  else {
+    add_processing(Tr("Volume"), false, Tr("100%, unity gain"));
+    report.stages << Stage{ Tr("Volume"), Tr("100%, unity gain"), false };
+  }
 
-  // Output
-  QString output_name;
+  add_processing(Tr("ReplayGain"), config.replaygain, config.replaygain ? Tr("On") : Tr("Off"));
+  add_processing(Tr("Loudness normalization"), config.ebur128, config.ebur128 ? Tr("On (EBU R 128)") : Tr("Off"));
+  add_processing(Tr("Equalizer"), config.equalizer, config.equalizer ? Tr("On") : Tr("Off"));
+  add_processing(Tr("Stereo balance"), config.stereo_balancer, config.stereo_balancer ? Tr("On") : Tr("Off"));
+  add_processing(Tr("Crossfeed"), config.bs2b, config.bs2b ? Tr("On (headphone crossfeed)") : Tr("Off"));
+  add_processing(Tr("Channel remix"), config.channels_forced, config.channels_forced ? Tr("On (output channel count forced)") : Tr("Off"));
+  add_processing(Tr("Fade / crossfade"), config.fade_or_crossfade, config.fade_or_crossfade ? Tr("On (applied at track changes)") : Tr("Off"));
+
+  report.app_dsp_active = !report.alterations.isEmpty();
+  report.dsp_text = report.app_dsp_active ? Tr("App DSP on") : Tr("App DSP off");
+
+  // --- Output
   switch (report.output_kind) {
-    case OutputKind::AlsaDirect:  output_name = Tr("ALSA direct (hw)"); break;
-    case OutputKind::AlsaPlugin:  output_name = Tr("ALSA (plugin layer)"); break;
-    case OutputKind::SoundServer: output_name = Tr("Sound server"); break;
-    case OutputKind::Automatic:   output_name = Tr("Automatic output"); break;
-    case OutputKind::Other:       output_name = Tr("Output: %1").arg(config.output); break;
+    case OutputKind::AlsaDirect:  report.output_text = Tr("Direct ALSA"); break;
+    case OutputKind::AlsaPlugin:  report.output_text = Tr("ALSA plugin"); break;
+    case OutputKind::SoundServer: report.output_text = Tr("System mixer"); break;
+    case OutputKind::Automatic:   report.output_text = Tr("Auto output"); break;
+    case OutputKind::Other:       report.output_text = config.output.isEmpty() ? Tr("Output") : config.output; break;
   }
-  report.stages << Stage{ output_name, config.device, false };
+  report.stages << Stage{ report.output_text, config.device, false };
 
-  // What we cannot know
+  report.output_rows << qMakePair(Tr("Output"), config.output.isEmpty() ? Tr("Automatic") : config.output);
+  report.output_rows << qMakePair(Tr("Device"), config.device.isEmpty() ? Tr("Default") : config.device);
+  report.output_rows << qMakePair(Tr("Path"), report.output_text);
+  if (config.exclusive_mode) report.output_rows << qMakePair(Tr("Exclusive mode"), Tr("On"));
+
   switch (report.output_kind) {
     case OutputKind::AlsaDirect:
       report.caveats << Tr("The driver and DAC are not visible to Adrift. A hw: device can still reject the format or be shared with other software.");
@@ -194,7 +235,7 @@ Report Analyze(const Source &source, const Config &config) {
       report.caveats << Tr("ALSA plugins such as plug, dmix or the default device may resample, convert or mix.");
       break;
     case OutputKind::SoundServer:
-      report.caveats << Tr("The sound server may mix and resample to its own format.");
+      report.caveats << Tr("The sound server (PulseAudio or PipeWire) mixes with other applications and may resample to its own format.");
       break;
     case OutputKind::Automatic:
       report.caveats << Tr("The output is chosen automatically, so Adrift cannot tell whether it is resampled.");
@@ -203,46 +244,56 @@ Report Analyze(const Source &source, const Config &config) {
       report.caveats << Tr("Adrift cannot inspect this output.");
       break;
   }
-  if (report.tier == Tier::Unknown) report.caveats << Tr("The source did not report enough information to classify its quality.");
+  if (report.tier == Tier::Unknown) report.caveats << Tr("The source did not report enough information to classify its quality yet.");
   if (report.tier == Tier::Lossless && source.bitdepth == 0) report.caveats << Tr("Bit depth was not reported by the source.");
   if (source.dsd) report.caveats << Tr("DSD is decoded to PCM unless the output supports DSD natively.");
 
-  // Badge
-  QStringList badge;
-  if (!source.format.isEmpty() && source.format != "Stream"_L1) badge << source.format;
-  if (!depth_rate.isEmpty()) badge << depth_rate;
-  QString badge_text = badge.join(u' ');
-  const QString tier_text = TierText(report.tier);
-  badge_text = badge_text.isEmpty() ? tier_text : badge_text + u" · "_s + tier_text;
-  report.badge = badge_text;
+  // --- Texts. App DSP and output certainty are two different statements and are never merged into a single "bit-perfect" style claim.
+  report.badge = report.source_text + u" · "_s + report.output_text;
 
-  // Verdict: never "bit-perfect".
-  if (!report.alterations.isEmpty()) {
-    report.verdict = Tr("Altered by: %1").arg(report.alterations.join(u", "_s));
-  }
-  else if (report.output_kind == OutputKind::AlsaDirect) {
-    report.verdict = Tr("No software processing, direct ALSA output (not verified end to end)");
+  if (report.app_dsp_active) {
+    report.dsp_verdict = Tr("Altered by: %1").arg(report.alterations.join(u", "_s));
   }
   else {
-    report.verdict = Tr("No software processing configured (not verified end to end)");
+    report.dsp_verdict = Tr("App DSP off: no software processing is configured in Adrift.");
   }
 
-  // Tooltip / accessible description
-  QStringList lines;
-  lines << report.badge << report.verdict << QString();
-  for (const Stage &stage : std::as_const(report.stages)) {
-    QString line = QStringLiteral("• ") + stage.name;
-    if (!stage.detail.isEmpty()) line += QStringLiteral(": ") + stage.detail;
-    if (stage.alters_signal) line += QStringLiteral(" ") + Tr("[alters signal]");
-    lines << line;
+  switch (report.output_kind) {
+    case OutputKind::AlsaDirect:  report.output_verdict = Tr("Direct ALSA output. Not verified end to end."); break;
+    case OutputKind::SoundServer: report.output_verdict = Tr("Goes through the system mixer, which may mix and resample."); break;
+    case OutputKind::AlsaPlugin:  report.output_verdict = Tr("Goes through an ALSA plugin layer, which may convert or mix."); break;
+    case OutputKind::Automatic:   report.output_verdict = Tr("Output chosen automatically. Not verified."); break;
+    case OutputKind::Other:       report.output_verdict = Tr("Output cannot be inspected."); break;
   }
+  report.verdict = report.dsp_verdict + u' ' + report.output_verdict;
+
+  // --- Tooltip
+  QStringList lines;
+  lines << report.badge << report.dsp_text << QString();
+  lines << report.dsp_verdict << report.output_verdict;
   if (!report.caveats.isEmpty()) {
     lines << QString();
-    for (const QString &caveat : std::as_const(report.caveats)) {
-      lines << caveat;
-    }
+    for (const QString &caveat : std::as_const(report.caveats)) lines << caveat;
   }
+  lines << QString() << Tr("Click for details.");
   report.description = lines.join(u'\n');
+
+  // --- Copyable technical text
+  auto section = [](const QString &title, const Report::Rows &rows) {
+    QStringList out;
+    out << title;
+    for (const auto &row : rows) out << QStringLiteral("  %1: %2").arg(row.first, row.second);
+    return out.join(u'\n');
+  };
+  QStringList technical;
+  technical << QStringLiteral("Adrift signal path");
+  technical << section(Tr("Source"), report.source_rows);
+  technical << section(Tr("Processing"), report.processing_rows);
+  technical << section(Tr("Output"), report.output_rows);
+  technical << report.dsp_verdict << report.output_verdict;
+  for (const QString &caveat : std::as_const(report.caveats)) technical << QStringLiteral("Note: ") + caveat;
+  technical << Tr("This describes Adrift's configuration and the track's metadata. It does not prove bit-perfect playback.");
+  report.technical_text = technical.join(u'\n');
 
   return report;
 

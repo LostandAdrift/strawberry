@@ -112,6 +112,9 @@
 #include "utilities/screenutils.h"
 #include "engine/enginebase.h"
 #include "dialogs/errordialog.h"
+#include "dialogs/signalpathdialog.h"
+#include "streaming/playlistimportdialog.h"
+#include "widgets/signalpathwidget.h"
 #include "dialogs/aboutdialog.h"
 #include "dialogs/console.h"
 #include "dialogs/addstreamdialog.h"
@@ -177,6 +180,7 @@
 #endif
 #ifdef HAVE_TIDAL
 #  include "tidal/tidalservice.h"
+#  include "tidal/tidalplaylistsource.h"
 #  include "constants/tidalsettings.h"
 #endif
 #ifdef HAVE_SPOTIFY
@@ -186,6 +190,7 @@
 #endif
 #ifdef HAVE_QOBUZ
 #  include "qobuz/qobuzservice.h"
+#  include "qobuz/qobuzplaylistsource.h"
 #  include "qobuz/qobuzmetadatarequest.h"
 #  include "constants/qobuzsettings.h"
 #endif
@@ -643,6 +648,7 @@ MainWindow::MainWindow(Application *app,
   QObject::connect(ui_->action_auto_complete_tags, &QAction::triggered, this, &MainWindow::AutoCompleteTags);
 #endif
   QObject::connect(ui_->action_settings, &QAction::triggered, this, &MainWindow::OpenSettingsDialog);
+  QObject::connect(ui_->action_import_streaming_playlists, &QAction::triggered, this, &MainWindow::ShowPlaylistImportDialog);
   QObject::connect(ui_->action_toggle_show_sidebar, &QAction::toggled, this, &MainWindow::ToggleSidebar);
   QObject::connect(ui_->action_about_strawberry, &QAction::triggered, this, &MainWindow::ShowAboutDialog);
   QObject::connect(ui_->action_about_qt, &QAction::triggered, qApp, &QApplication::aboutQt);
@@ -654,6 +660,7 @@ MainWindow::MainWindow(Application *app,
   QObject::connect(ui_->action_add_stream, &QAction::triggered, this, &MainWindow::AddStream);
   QObject::connect(ui_->action_cover_manager, &QAction::triggered, this, &MainWindow::ShowCoverManager);
   QObject::connect(ui_->action_equalizer, &QAction::triggered, this, &MainWindow::ShowEqualizer);
+  QObject::connect(ui_->signal_path_widget, &QAbstractButton::clicked, this, &MainWindow::ShowSignalPathDialog);
   QObject::connect(&*app_->player()->engine(), &EngineBase::StateChanged, this, &MainWindow::UpdateSignalPath);
   QObject::connect(&*app_->player()->engine(), &EngineBase::VolumeChanged, this, &MainWindow::UpdateSignalPath);
   QObject::connect(&*equalizer_, &Equalizer::EqualizerEnabledChanged, this, &MainWindow::UpdateSignalPath);
@@ -1705,20 +1712,76 @@ void MainWindow::UpdateSignalPath() {
 
   const EngineBase::State state = app_->player()->engine()->state();
   if (state != EngineBase::State::Playing && state != EngineBase::State::Paused) {
-    ui_->label_signal_path->clear();
-    ui_->label_signal_path->setToolTip(QString());
-    ui_->label_signal_path->setAccessibleDescription(QString());
+    ui_->signal_path_widget->Clear();
     return;
   }
 
+  // Source metadata may arrive after the stream starts. Until it does the report says "Source unknown" instead of guessing.
   const SignalPath::Report report = SignalPath::Analyze(SignalPath::SourceFromSong(song_playing_), app_->player()->engine()->signal_path_config());
+  ui_->signal_path_widget->SetReport(report);
+  if (signal_path_dialog_ && signal_path_dialog_->isVisible()) signal_path_dialog_->SetReport(report);
 
-  // The text carries the information; color is never the only signal.
-  QString text = report.badge;
-  text += report.unaltered_configuration() ? QStringLiteral(" · ") + tr("no processing") : QStringLiteral(" · ") + tr("processed");
-  ui_->label_signal_path->setText(text);
-  ui_->label_signal_path->setToolTip(report.description.toHtmlEscaped().replace(u'\n', "<br>"_L1));
-  ui_->label_signal_path->setAccessibleDescription(report.description);
+}
+
+void MainWindow::ShowSignalPathDialog() {
+
+  if (!ui_->signal_path_widget->has_report()) return;
+
+  if (!signal_path_dialog_) {
+    signal_path_dialog_ = new SignalPathDialog(this);
+    QObject::connect(signal_path_dialog_, &SignalPathDialog::OutputSettingsRequested, this, [this]() {
+      settings_dialog_->OpenAtPage(SettingsDialog::Page::Backend);
+    });
+  }
+  signal_path_dialog_->SetReport(ui_->signal_path_widget->report());
+  signal_path_dialog_->show();
+  signal_path_dialog_->raise();
+  signal_path_dialog_->activateWindow();
+
+}
+
+void MainWindow::ShowPlaylistImportDialog() {
+
+  if (!playlist_import_dialog_) {
+    PlaylistImportDialog *dialog = new PlaylistImportDialog(this);
+
+#ifdef HAVE_TIDAL
+    if (TidalServicePtr tidal = app_->streaming_services()->Service<TidalService>()) {
+      PlaylistImportDialog::ServiceEntry entry;
+      entry.name = u"Tidal"_s;
+      entry.url_scheme = tidal->url_scheme();
+      entry.song_source = Song::Source::Tidal;
+      entry.page_source = new TidalPlaylistSource(&*tidal, app_->network(), dialog);
+      entry.logged_in = [tidal]() { return tidal->authenticated(); };
+      dialog->AddService(entry);
+    }
+#endif
+#ifdef HAVE_QOBUZ
+    if (QobuzServicePtr qobuz = app_->streaming_services()->Service<QobuzService>()) {
+      PlaylistImportDialog::ServiceEntry entry;
+      entry.name = u"Qobuz"_s;
+      entry.url_scheme = qobuz->url_scheme();
+      entry.song_source = Song::Source::Qobuz;
+      entry.page_source = new QobuzPlaylistSource(&*qobuz, app_->network(), dialog);
+      entry.logged_in = [qobuz]() { return qobuz->authenticated(); };
+      dialog->AddService(entry);
+    }
+#endif
+
+    dialog->SetSnapshotExistsFunction([this](const QString &identity) { return app_->playlist_manager()->HasSnapshot(identity); });
+    QObject::connect(dialog, &PlaylistImportDialog::SnapshotReady, this, [this, dialog](const QString &service_name, const QString &identity, const QString &playlist_name, const SongList &songs, const int skipped) {
+      Q_UNUSED(service_name)
+      bool replaced = false;
+      const int id = app_->playlist_manager()->ImportSnapshot(playlist_name, identity, songs, &replaced);
+      if (id < 0) return;
+      dialog->ShowImported(playlist_name, replaced, static_cast<int>(songs.count()), skipped);
+    });
+    playlist_import_dialog_ = dialog;
+  }
+
+  playlist_import_dialog_->show();
+  playlist_import_dialog_->raise();
+  playlist_import_dialog_->activateWindow();
 
 }
 

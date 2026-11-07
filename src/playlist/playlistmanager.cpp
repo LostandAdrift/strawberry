@@ -244,6 +244,36 @@ void PlaylistManager::New(const QString &name, const SongList &songs, const QStr
 
 }
 
+bool PlaylistManager::HasSnapshot(const QString &identity) const {
+
+  for (auto it = playlists_.constBegin(); it != playlists_.constEnd(); ++it) {
+    if (it->p && it->p->special_type() == identity) return true;
+  }
+  return false;
+
+}
+
+int PlaylistManager::ImportSnapshot(const QString &name, const QString &identity, const SongList &songs, bool *replaced) {
+
+  if (replaced) *replaced = false;
+  if (identity.isEmpty() || name.isNull()) return -1;
+
+  for (auto it = playlists_.begin(); it != playlists_.end(); ++it) {
+    if (it->p && it->p->special_type() == identity) {
+      const int id = it.key();
+      it->p->Clear();
+      it->p->InsertSongsOrCollectionItems(songs);
+      if (it->name != name) Rename(id, name);
+      if (replaced) *replaced = true;
+      return id;
+    }
+  }
+
+  New(name, songs, identity);
+  return current_id();
+
+}
+
 void PlaylistManager::Load(const QString &filename) {
 
   QFileInfo fileinfo(filename);

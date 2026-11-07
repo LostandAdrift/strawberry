@@ -29,6 +29,8 @@
 #include <QColor>
 #include <QPalette>
 
+#include "themepalette.h"
+
 class Appearance : public QObject {
   Q_OBJECT
   Q_DISABLE_COPY_MOVE(Appearance)
@@ -57,6 +59,9 @@ class Appearance : public QObject {
   void set_system_palette(const QPalette &palette) { system_palette_ = palette; }
 
   void LoadCustomPaletteColors();
+
+  // The effective theme from settings: an explicit choice, else the system colors for installs with an existing color choice, else Adrift Dark.
+  static ThemePalette::Theme StoredTheme();
 
   // Applies the given per-role colors on top of the current application palette.
   static void SetCustomPaletteColors(const QMap<QPalette::ColorRole, QColor> &colors);

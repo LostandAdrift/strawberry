@@ -33,6 +33,8 @@ constexpr char kOutput[] = "output";
 constexpr char kDeviceU[] = "Device";
 constexpr char kDevice[] = "device";
 constexpr char kALSAPlugin[] = "alsaplugin";
+// JSON backup of the settings changed by the Direct ALSA setup helper, so they can be restored.
+constexpr char kDirectAlsaBackup[] = "direct_alsa_backup";
 constexpr char kExclusiveMode[] = "exclusive_mode";
 constexpr char kVolumeControl[] = "volume_control";
 constexpr char kVolumeExponential[] = "volume_exponential";

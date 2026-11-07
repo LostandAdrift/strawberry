@@ -20,23 +20,37 @@
 #ifndef PLAYLISTIMPORT_H
 #define PLAYLISTIMPORT_H
 
+#include "config.h"
+
 #include <QJsonObject>
 #include <QList>
-#include <QSet>
+#include <QMetaType>
+#include <QObject>
 #include <QString>
+#include <QUrl>
 
-// Read-only playlist import helpers for streaming services.
+#include "core/song.h"
+
+// Read-only playlist import from streaming services.
 //
-// This is a one way import: remote playlists are read and local copies can be refreshed.
-// Nothing here writes to the remote service, and there is no bidirectional sync.
-// The functions are pure (JSON in, values out) so they can be tested without a network or credentials.
+// A remote playlist is read page by page and delivered as one complete, ordered list of tracks.
+// The local playlist is a snapshot: refreshing replaces it with the latest complete remote list.
+// Nothing here writes to the remote service and nothing is merged or "synced" in two directions.
+//
+// The importer talks to a PageSource, which hides the network. Tests use a scripted fake source; the app uses
+// TidalPlaylistSource and QobuzPlaylistSource.
 namespace PlaylistImport {
 
 struct Track {
   QString id;
   QString title;
   QString artist;
+  QString artist_id;
   QString album;
+  QString album_id;
+  QUrl cover_url;
+  int track = 0;
+  int disc = 0;
   qint64 duration_sec = 0;
   bool available = true;
 };
@@ -51,6 +65,7 @@ struct PlaylistInfo {
 template<typename T>
 struct Page {
   QList<T> items;
+  int raw_count = 0;  // Number of entries the server returned, before any filtering. Pagination uses this, not items.size().
   int offset = 0;
   int total = -1;  // -1 if the service did not report a total
   bool valid = false;
@@ -64,9 +79,12 @@ enum class Service {
 Page<PlaylistInfo> ParsePlaylistList(const Service service, const QJsonObject &json);
 Page<Track> ParsePlaylistTracks(const Service service, const QJsonObject &json);
 
+// Builds a playable song for a track. `url_scheme` is the streaming service's URL scheme (e.g. from StreamingService::url_scheme()).
+Song TrackToSong(const Track &track, const Song::Source source, const QString &url_scheme);
+
 // Plans the next request of a paginated listing and guarantees termination.
-// Stops when the reported total is reached, when a page is empty, or after kMaxPages pages,
-// so a misbehaving server can never make the importer loop forever.
+// Stops when the reported total is reached, when a page is empty, or after kMaxPages pages.
+// The offset advances by the number of entries actually received.
 class Paginator {
  public:
   static constexpr int kMaxPages = 500;
@@ -78,8 +96,8 @@ class Paginator {
   bool finished() const { return finished_; }
   bool truncated() const { return truncated_; }
 
-  // Feed each parsed page. Returns true if another page should be requested at offset().
-  bool Advance(const int items_in_page, const int reported_total);
+  // Feed each page. Returns true if another page should be requested at offset().
+  bool Advance(const int raw_items_in_page, const int reported_total);
 
  private:
   int page_size_;
@@ -89,17 +107,91 @@ class Paginator {
   bool truncated_ = false;
 };
 
-struct MergeResult {
-  QList<Track> to_append;  // New tracks, in remote order, each id at most once
-  int duplicates_skipped = 0;
-  int unavailable_skipped = 0;
+// Result of one request, as delivered by a PageSource. Never contains secrets.
+struct PageResult {
+  bool ok = false;
+  QString error;           // User-readable message when !ok
+  int http_status = 0;     // 0 if unknown
+  QJsonObject json;
 };
 
-// Returns the tracks that are not already in the local playlist.
-// Repeated refreshes with the same remote data append nothing.
-// Duplicates inside the remote data itself are only added once.
-MergeResult MergeNewTracks(const QSet<QString> &existing_ids, const QList<Track> &remote);
+// Asynchronous page access. One request at a time. Cancel() must make sure no further PageReady is emitted for the cancelled request.
+class PageSource : public QObject {
+  Q_OBJECT
+
+ public:
+  explicit PageSource(QObject *parent = nullptr) : QObject(parent) {}
+
+  virtual Service service() const = 0;
+  virtual void RequestPlaylists(const int offset, const int limit) = 0;
+  virtual void RequestTracks(const QString &playlist_id, const int offset, const int limit) = 0;
+  virtual void Cancel() = 0;
+
+ Q_SIGNALS:
+  void PageReady(const PlaylistImport::PageResult &result);
+};
+
+// Drives a PageSource to read all playlists, or one complete playlist.
+// A result is delivered only after every page was received and verified; any error, cancellation, page cap or inconsistent total
+// discards everything read so far, so a partial list is never imported.
+class Importer : public QObject {
+  Q_OBJECT
+
+ public:
+  enum class State {
+    Idle,
+    LoadingPlaylists,
+    LoadingTracks
+  };
+
+  static constexpr int kPageSize = 100;
+
+  explicit Importer(PageSource *source, QObject *parent = nullptr);
+
+  State state() const { return state_; }
+  bool busy() const { return state_ != State::Idle; }
+
+ public Q_SLOTS:
+  // Both are ignored while busy.
+  void LoadPlaylists();
+  void ImportPlaylist(const PlaylistImport::PlaylistInfo &playlist);
+  void Cancel();
+
+ Q_SIGNALS:
+  void StateChanged(const PlaylistImport::Importer::State state);
+  // loaded entries (raw count) and the reported total, or -1 when unknown
+  void Progress(const int loaded, const int total);
+  void PlaylistsLoaded(const QList<PlaylistImport::PlaylistInfo> &playlists);
+  // `skipped` is the number of entries left out because they are unavailable (not playable); order and duplicates of the others are kept.
+  void PlaylistImported(const PlaylistImport::PlaylistInfo &playlist, const QList<PlaylistImport::Track> &tracks, const int skipped);
+  void Failed(const QString &message);
+  void Cancelled();
+
+ private Q_SLOTS:
+  void PageReceived(const PlaylistImport::PageResult &result);
+
+ private:
+  void SetState(const State state);
+  void Reset();
+  void Fail(const QString &message);
+  void RequestNext();
+  void Finish();
+
+  PageSource *source_;
+  State state_;
+  Paginator paginator_;
+  PlaylistInfo current_playlist_;
+  QList<PlaylistInfo> playlists_;
+  QList<Track> tracks_;
+  int received_;
+  int expected_total_;
+};
 
 }  // namespace PlaylistImport
+
+Q_DECLARE_METATYPE(PlaylistImport::PageResult)
+Q_DECLARE_METATYPE(PlaylistImport::PlaylistInfo)
+Q_DECLARE_METATYPE(PlaylistImport::Track)
+Q_DECLARE_METATYPE(PlaylistImport::Importer::State)
 
 #endif  // PLAYLISTIMPORT_H

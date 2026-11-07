@@ -6,8 +6,10 @@
 Strawberry is a **music player and music collection organizer**, originally forked from *Clementine* in 2018.
 It’s written in **C++ using the Qt framework**, designed for **audiophiles and music collectors**.
 
-> **Adrift fork:** this branch carries the Adrift listening-room changes (color themes including Omarchy, an honest audio signal path badge, a tested playlist import core).
-> See [ADRIFT.md](ADRIFT.md) for features, limits and a direct ALSA guide. Adrift is a fork of Strawberry and keeps its GPLv3 license and credits.
+> **Adrift fork:** this branch carries the Adrift listening-room changes:
+> an Adrift Dark theme (the default on fresh installs) and an Omarchy colors option, an honest audio signal path badge with a details dialog (it never claims bit-perfect),
+> read-only Tidal and Qobuz playlist import with refreshable local snapshots, and a guided Direct ALSA setup that never touches your volume.
+> See [ADRIFT.md](ADRIFT.md) for exactly what each feature does and its limits. Adrift is a fork of Strawberry and keeps its GPLv3 license and credits.
 
 ![Screenshot of Strawberry Music Player](https://raw.githubusercontent.com/strawberrymusicplayer/strawberry/master/data/screenshot/screenshot.png)
 

@@ -34,36 +34,6 @@
 
 Appearance::Appearance(QObject *parent) : QObject(parent), system_palette_(QApplication::palette()) {}
 
-namespace {
-
-bool IsTextColorRole(const QPalette::ColorRole color_role) {
-
-  return color_role == QPalette::WindowText || color_role == QPalette::Text || color_role == QPalette::ButtonText || color_role == QPalette::BrightText || color_role == QPalette::PlaceholderText;
-
-}
-
-QPalette::ColorRole BackgroundRoleForTextRole(const QPalette::ColorRole color_role) {
-
-  switch (color_role) {
-    case QPalette::Text:
-    case QPalette::PlaceholderText:
-      return QPalette::Base;
-    case QPalette::ButtonText:
-      return QPalette::Button;
-    default:
-      return QPalette::Window;
-  }
-
-}
-
-QColor DimmedTextColor(const QColor &text_color, const QColor &background_color) {
-
-  return QColor((text_color.red() + background_color.red()) / 2, (text_color.green() + background_color.green()) / 2, (text_color.blue() + background_color.blue()) / 2);
-
-}
-
-}  // namespace
-
 const QList<Appearance::ColorRole> &Appearance::ColorRoles() {
 
   static const QList<ColorRole> color_roles = {
@@ -109,7 +79,7 @@ void Appearance::LoadCustomPaletteColors() {
   Settings s;
   s.beginGroup(AppearanceSettings::kSettingsGroup);
   const bool use_custom_color_set = s.value(AppearanceSettings::kUseCustomColorSet).toBool();
-  const ThemePalette::Theme theme = ThemePalette::ThemeFromString(s.value(AppearanceSettings::kColorTheme, QLatin1String(AppearanceSettings::kDefaultColorTheme)).toString());
+  const ThemePalette::Theme theme = StoredTheme();
 
   // A named theme takes precedence over the custom color set.
   // If the theme cannot be resolved (e.g. Omarchy is not installed) fall through to the custom/system colors.
@@ -139,26 +109,18 @@ void Appearance::SetCustomPaletteColors(const QMap<QPalette::ColorRole, QColor> 
 
   Q_ASSERT(QThread::currentThread() == qApp->thread());
 
-  // Only set the active and inactive color groups here, the disabled color group is handled below so that disabled widgets still look greyed out with a custom color set.
-  QPalette palette = QApplication::palette();
-  for (QMap<QPalette::ColorRole, QColor>::const_iterator it = colors.constBegin(); it != colors.constEnd(); ++it) {
-    if (it.value().isValid()) {
-      palette.setColor(QPalette::Active, it.key(), it.value());
-      palette.setColor(QPalette::Inactive, it.key(), it.value());
-      if (!IsTextColorRole(it.key())) {
-        palette.setColor(QPalette::Disabled, it.key(), it.value());
-      }
-    }
-  }
+  QApplication::setPalette(ThemePalette::BuildPalette(QApplication::palette(), colors));
 
-  // Dim the text roles for the disabled color group by blending them with the corresponding background color.
-  for (QMap<QPalette::ColorRole, QColor>::const_iterator it = colors.constBegin(); it != colors.constEnd(); ++it) {
-    if (it.value().isValid() && IsTextColorRole(it.key())) {
-      const QColor background_color = palette.color(QPalette::Disabled, BackgroundRoleForTextRole(it.key()));
-      palette.setColor(QPalette::Disabled, it.key(), DimmedTextColor(it.value(), background_color));
-    }
-  }
+}
 
-  QApplication::setPalette(palette);
+ThemePalette::Theme Appearance::StoredTheme() {
+
+  Settings s;
+  s.beginGroup(AppearanceSettings::kSettingsGroup);
+  // An existing explicit color choice (custom or system) is honored; only installs without one get the premium default.
+  const bool explicit_choice = s.contains(AppearanceSettings::kUseCustomColorSet);
+  const ThemePalette::Theme theme = ThemePalette::ResolveTheme(s.value(AppearanceSettings::kColorTheme).toString(), explicit_choice);
+  s.endGroup();
+  return theme;
 
 }

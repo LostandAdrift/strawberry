@@ -23,6 +23,7 @@
 #include <QColor>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QMap>
 #include <QPalette>
 #include <QString>
@@ -198,9 +199,147 @@ TEST(ThemePaletteTest, LoadOmarchyColorsIgnoresOversizedFile) {
 
 TEST(ThemePaletteTest, OmarchyCandidatesAreFixedPaths) {
 
+  // The state directory is preferred, the legacy config location is the fallback.
   const QStringList candidates = OmarchyColorsCandidates(QStringLiteral("/home/example"));
-  ASSERT_EQ(1, candidates.size());
-  EXPECT_EQ(QStringLiteral("/home/example/.config/omarchy/current/theme/colors.toml"), candidates.first());
+  ASSERT_EQ(2, candidates.size());
+  EXPECT_EQ(QStringLiteral("/home/example/.local/state/omarchy/current/theme/colors.toml"), candidates[0]);
+  EXPECT_EQ(QStringLiteral("/home/example/.config/omarchy/current/theme/colors.toml"), candidates[1]);
+
+}
+
+namespace {
+
+// Same key layout as a real Omarchy installation (values are a sample theme).
+const QByteArray kRealOmarchyToml =
+    "mode = \"dark\"\n"
+    "accent = \"#faa968\"\n"
+    "selection = \"#134e5a\"\n"
+    "muted = \"#2a6b78\"\n"
+    "background = \"#05182e\"\n"
+    "dark_background = \"#031222\"\n"
+    "darker_background = \"#020c17\"\n"
+    "lighter_background = \"#0a2540\"\n"
+    "foreground = \"#f6dcac\"\n"
+    "dark_foreground = \"#3f8f8a\"\n"
+    "light_foreground = \"#a7c9c6\"\n"
+    "bright_foreground = \"#f6dcac\"\n"
+    "red = \"#e0524a\"\n"
+    "yellow = \"#f2c14e\"\n";
+
+void WriteFile(const QString &path, const QByteArray &data) {
+  QDir().mkpath(QFileInfo(path).absolutePath());
+  QFile file(path);
+  ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+  file.write(data);
+}
+
+}  // namespace
+
+TEST(ThemePaletteTest, RealOmarchyKeyLayoutBuildsReadablePalette) {
+
+  const QMap<QString, QColor> colors = ParseColorsToml(kRealOmarchyToml);
+  EXPECT_FALSE(colors.contains(QStringLiteral("mode")));  // not a color, ignored
+  const QMap<QPalette::ColorRole, QColor> c = PaletteFromOmarchyColors(colors);
+  ASSERT_FALSE(c.isEmpty());
+  EXPECT_EQ(QColor(0x05, 0x18, 0x2e), c.value(QPalette::Window));
+  EXPECT_EQ(QColor(0x02, 0x0c, 0x17), c.value(QPalette::Base));
+  EXPECT_EQ(QColor(0x0a, 0x25, 0x40), c.value(QPalette::Button));
+  EXPECT_EQ(QColor(0xfa, 0xa9, 0x68), c.value(QPalette::Highlight));
+  EXPECT_GE(ContrastRatio(c.value(QPalette::Text), c.value(QPalette::Base)), 4.5);
+  EXPECT_GE(ContrastRatio(c.value(QPalette::HighlightedText), c.value(QPalette::Highlight)), 4.5);
+
+}
+
+TEST(ThemePaletteTest, StateFileWinsOverLegacyConfig) {
+
+  QTemporaryDir home;
+  ASSERT_TRUE(home.isValid());
+  WriteFile(home.path() + QStringLiteral("/.local/state/omarchy/current/theme/colors.toml"), kRealOmarchyToml);
+  WriteFile(home.path() + QStringLiteral("/.config/omarchy/current/theme/colors.toml"), "background = \"#ffffff\"\nforeground = \"#000000\"\n");
+
+  const QMap<QString, QColor> colors = LoadOmarchyColors(OmarchyColorsCandidates(home.path()));
+  EXPECT_EQ(QColor(0x05, 0x18, 0x2e), colors.value(QStringLiteral("background")));
+
+}
+
+TEST(ThemePaletteTest, IncompleteOrInvalidStateFileFallsBackToLegacy) {
+
+  QTemporaryDir home;
+  ASSERT_TRUE(home.isValid());
+  const QString legacy = home.path() + QStringLiteral("/.config/omarchy/current/theme/colors.toml");
+  WriteFile(legacy, kRealOmarchyToml);
+
+  const QString state = home.path() + QStringLiteral("/.local/state/omarchy/current/theme/colors.toml");
+  const QStringList candidates = OmarchyColorsCandidates(home.path());
+
+  // Incomplete: only an accent, no background/foreground.
+  WriteFile(state, "accent = \"#faa968\"\n");
+  EXPECT_EQ(QColor(0x05, 0x18, 0x2e), LoadOmarchyColors(candidates).value(QStringLiteral("background")));
+
+  // Invalid colors.
+  WriteFile(state, "background = \"red\"\nforeground = \"#12\"\n");
+  EXPECT_EQ(QColor(0x05, 0x18, 0x2e), LoadOmarchyColors(candidates).value(QStringLiteral("background")));
+
+  // Binary garbage.
+  WriteFile(state, QByteArray("\x00\x01\xff\xfe\n=\n", 7));
+  EXPECT_EQ(QColor(0x05, 0x18, 0x2e), LoadOmarchyColors(candidates).value(QStringLiteral("background")));
+
+  // Empty file.
+  WriteFile(state, QByteArray());
+  EXPECT_EQ(QColor(0x05, 0x18, 0x2e), LoadOmarchyColors(candidates).value(QStringLiteral("background")));
+
+  // Nothing usable anywhere: empty result, callers fall back to the system palette.
+  QFile::remove(legacy);
+  EXPECT_TRUE(LoadOmarchyColors(candidates).isEmpty());
+
+}
+
+TEST(ThemePaletteTest, ResolveThemeDefaultsAndExplicitChoices) {
+
+  // Fresh install: premium default.
+  EXPECT_EQ(Theme::AdriftDark, ResolveTheme(QString(), false));
+  // Existing explicit custom/system color choice is honored.
+  EXPECT_EQ(Theme::System, ResolveTheme(QString(), true));
+  // An explicit theme always wins.
+  EXPECT_EQ(Theme::System, ResolveTheme(QStringLiteral("system"), false));
+  EXPECT_EQ(Theme::Omarchy, ResolveTheme(QStringLiteral("omarchy"), true));
+  EXPECT_EQ(Theme::AdriftDark, ResolveTheme(QStringLiteral("adrift-dark"), true));
+
+}
+
+TEST(ThemePaletteTest, BuildPaletteRestoresEveryRoleOnCancel) {
+
+  // A "system" palette with distinctive Highlight/Link values that the custom color set never edits.
+  QPalette system;
+  system.setColor(QPalette::Highlight, QColor(10, 20, 30));
+  system.setColor(QPalette::HighlightedText, QColor(250, 250, 250));
+  system.setColor(QPalette::Link, QColor(1, 2, 3));
+  system.setColor(QPalette::Window, QColor(200, 200, 200));
+
+  // Previewing a theme changes those roles...
+  const QPalette themed = BuildPalette(system, AdriftDarkColors());
+  EXPECT_NE(system.color(QPalette::Highlight), themed.color(QPalette::Highlight));
+  EXPECT_NE(system.color(QPalette::Link), themed.color(QPalette::Link));
+
+  // ...and rebuilding from the system palette with no colors (Cancel / System) restores all of them, in every group.
+  const QPalette restored = BuildPalette(system, QMap<QPalette::ColorRole, QColor>());
+  for (const QPalette::ColorGroup group : { QPalette::Active, QPalette::Inactive, QPalette::Disabled }) {
+    for (const QPalette::ColorRole role : { QPalette::Highlight, QPalette::HighlightedText, QPalette::Link, QPalette::Window }) {
+      EXPECT_EQ(system.color(group, role), restored.color(group, role));
+    }
+  }
+  // The input palette is never mutated.
+  EXPECT_EQ(QColor(10, 20, 30), system.color(QPalette::Highlight));
+
+}
+
+TEST(ThemePaletteTest, BuildPaletteDimsDisabledText) {
+
+  const QPalette themed = BuildPalette(QPalette(), AdriftDarkColors());
+  EXPECT_EQ(AdriftDarkColors().value(QPalette::Highlight), themed.color(QPalette::Active, QPalette::Highlight));
+  EXPECT_EQ(AdriftDarkColors().value(QPalette::Highlight), themed.color(QPalette::Disabled, QPalette::Highlight));
+  EXPECT_NE(themed.color(QPalette::Active, QPalette::WindowText), themed.color(QPalette::Disabled, QPalette::WindowText));
+  EXPECT_LT(ContrastRatio(themed.color(QPalette::Disabled, QPalette::WindowText), themed.color(QPalette::Window)), ContrastRatio(themed.color(QPalette::Active, QPalette::WindowText), themed.color(QPalette::Window)));
 
 }
 

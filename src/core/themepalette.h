@@ -37,6 +37,11 @@ enum class Theme {
   Omarchy
 };
 
+// Resolves the stored theme setting.
+// An explicit stored theme wins. Without one, an install that already saved an explicit color choice keeps the system colors,
+// and a fresh install gets Adrift Dark.
+Theme ResolveTheme(const QString &stored_theme, const bool has_explicit_color_choice);
+
 // Settings values for Theme.
 QString ThemeToString(const Theme theme);
 Theme ThemeFromString(const QString &value);
@@ -46,12 +51,19 @@ Theme ThemeFromString(const QString &value);
 // Unknown or malformed lines are skipped.
 QMap<QString, QColor> ParseColorsToml(const QByteArray &data);
 
-// Candidate locations for the current Omarchy theme colors, in priority order.
-// Only fixed, well-known paths below the user's config dir are used.
+// Candidate locations for the current Omarchy theme colors, in priority order:
+// $XDG_STATE_HOME (default ~/.local/state) /omarchy/current/theme/colors.toml, then the legacy $XDG_CONFIG_HOME (default ~/.config) location.
+// If home_dir is given, only paths below it are returned and the environment is ignored (for tests).
 QStringList OmarchyColorsCandidates(const QString &home_dir = QString());
 
-// Reads the first readable candidate. Returns an empty map if none is found.
+// Reads candidates in order and returns the first file that yields a usable palette (a valid background and foreground).
+// Unreadable, oversized, invalid or incomplete files are skipped, so a broken state file falls through to the legacy location.
+// Returns an empty map if none is usable.
 QMap<QString, QColor> LoadOmarchyColors(const QStringList &candidates = OmarchyColorsCandidates());
+
+// Applies theme colors on top of a copy of `base`, so every role not in `colors` (including Highlight, HighlightedText and Link)
+// keeps the base value. Passing no colors returns the base unchanged. Text roles are dimmed in the disabled group.
+QPalette BuildPalette(const QPalette &base, const QMap<QPalette::ColorRole, QColor> &colors);
 
 // WCAG 2.x relative luminance and contrast ratio.
 double RelativeLuminance(const QColor &color);

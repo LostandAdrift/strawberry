@@ -79,6 +79,8 @@ class TagEditor;
 class LyricsEditor;
 class Equalizer;
 class ErrorDialog;
+class SignalPathDialog;
+class PlaylistImportDialog;
 class FileView;
 class GlobalShortcutsManager;
 class MimeData;
@@ -203,6 +205,8 @@ class MainWindow : public QMainWindow, public PlatformInterface {
 
   void SongChanged(const Song &song);
   void UpdateSignalPath();
+  void ShowSignalPathDialog();
+  void ShowPlaylistImportDialog();
   void MuteChanged(const bool mute);
 
   void CopyFilesToCollection(const QList<QUrl> &urls);
@@ -362,6 +366,8 @@ class MainWindow : public QMainWindow, public PlatformInterface {
   QueueView *queue_view_;
 
   Lazy<SettingsDialog> settings_dialog_;
+  SignalPathDialog *signal_path_dialog_ = nullptr;
+  PlaylistImportDialog *playlist_import_dialog_ = nullptr;
   Lazy<AlbumCoverManager> cover_manager_;
   SharedPtr<Equalizer> equalizer_;
   Lazy<OrganizeDialog> organize_dialog_;

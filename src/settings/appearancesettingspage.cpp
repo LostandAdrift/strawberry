@@ -88,7 +88,7 @@ AppearanceSettingsPage::AppearanceSettingsPage(SettingsDialog *dialog, SharedPtr
 
   ui_->combobox_color_theme->addItem(tr("System"), ThemePalette::ThemeToString(ThemePalette::Theme::System));
   ui_->combobox_color_theme->addItem(tr("Adrift Dark"), ThemePalette::ThemeToString(ThemePalette::Theme::AdriftDark));
-  ui_->combobox_color_theme->addItem(tr("Omarchy (follow desktop theme)"), ThemePalette::ThemeToString(ThemePalette::Theme::Omarchy));
+  ui_->combobox_color_theme->addItem(tr("Omarchy colors (read when Adrift starts)"), ThemePalette::ThemeToString(ThemePalette::Theme::Omarchy));
 
   ui_->combobox_background_image_position->setItemData(0, static_cast<int>(BackgroundImagePosition::UpperLeft));
   ui_->combobox_background_image_position->setItemData(1, static_cast<int>(BackgroundImagePosition::UpperRight));
@@ -161,14 +161,14 @@ void AppearanceSettingsPage::Load() {
   ui_->checkbox_dark_mode->setChecked(original_dark_mode_);
 
   // Colors
-  original_color_theme_ = s.value(kColorTheme, QLatin1String(kDefaultColorTheme)).toString();
+  original_color_theme_ = ThemePalette::ThemeToString(Appearance::StoredTheme());
   {
     const QSignalBlocker blocker(ui_->combobox_color_theme);
     const int theme_index = ui_->combobox_color_theme->findData(ThemePalette::ThemeToString(ThemePalette::ThemeFromString(original_color_theme_)));
     ui_->combobox_color_theme->setCurrentIndex(theme_index >= 0 ? theme_index : 0);
   }
 
-  const QPalette palette = QApplication::palette();
+  const QPalette &palette = system_palette_;
 
   // Keep in mind originals colors, in case the user clicks on Cancel, to be able to restore colors
   original_use_custom_color_set_ = s.value(kUseCustomColorSet, kDefaultUseCustomColorSet).toBool();
@@ -480,16 +480,11 @@ bool AppearanceSettingsPage::ApplyStyle(const QString &current_style, const QStr
 
 void AppearanceSettingsPage::ApplyColorTheme(const QString &theme_name, const bool use_custom_color_set, const QMap<QPalette::ColorRole, QColor> &custom_colors) {
 
-  // Always start from the untouched system palette so switching themes never stacks colors.
-  QApplication::setPalette(system_palette_);
-
-  const QMap<QPalette::ColorRole, QColor> theme_colors = ThemePalette::ColorsForTheme(ThemePalette::ThemeFromString(theme_name));
-  if (!theme_colors.isEmpty()) {
-    Appearance::SetCustomPaletteColors(theme_colors);
-  }
-  else if (use_custom_color_set) {
-    Appearance::SetCustomPaletteColors(custom_colors);
-  }
+  // Always rebuild from a copy of the untouched system palette, so switching themes or cancelling restores every role
+  // (including Highlight, HighlightedText and Link that the custom color set does not edit).
+  QMap<QPalette::ColorRole, QColor> colors = ThemePalette::ColorsForTheme(ThemePalette::ThemeFromString(theme_name));
+  if (colors.isEmpty() && use_custom_color_set) colors = custom_colors;
+  QApplication::setPalette(ThemePalette::BuildPalette(system_palette_, colors));
 
 }
 
@@ -563,7 +558,15 @@ void AppearanceSettingsPage::SelectColor(const QPalette::ColorRole role) {
 }
 
 void AppearanceSettingsPage::ApplyCustomColors() {
-  Appearance::SetCustomPaletteColors(current_colors_);
+
+  // Editing custom colors means the user wants the custom set, so a named theme (which would override it) is switched off.
+  const int system_index = ui_->combobox_color_theme->findData(ThemePalette::ThemeToString(ThemePalette::Theme::System));
+  if (system_index >= 0 && ui_->combobox_color_theme->currentIndex() != system_index) {
+    const QSignalBlocker blocker(ui_->combobox_color_theme);
+    ui_->combobox_color_theme->setCurrentIndex(system_index);
+  }
+  ApplyColorTheme(ThemePalette::ThemeToString(ThemePalette::Theme::System), true, current_colors_);
+
 }
 
 void AppearanceSettingsPage::SetDarkColors() {
@@ -589,7 +592,7 @@ void AppearanceSettingsPage::UseCustomColorSetOptionChanged(const bool checked) 
     ApplyCustomColors();
   }
   else {
-    QApplication::setPalette(system_palette_);
+    ApplyColorTheme(ui_->combobox_color_theme->currentData().toString(), false, current_colors_);
   }
 
 }

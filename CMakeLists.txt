@@ -637,6 +637,7 @@ set(SOURCES
 
   src/engine/enginebase.cpp
   src/engine/signalpath.cpp
+  src/engine/directalsa.cpp
   src/engine/enginedevice.cpp
   src/engine/audiodevicelisters.cpp
   src/engine/audiodevicelister.cpp
@@ -810,6 +811,8 @@ set(SOURCES
   src/dialogs/aboutdialog.cpp
   src/dialogs/console.cpp
   src/dialogs/errordialog.cpp
+  src/dialogs/signalpathdialog.cpp
+  src/dialogs/directalsadialog.cpp
   src/dialogs/addstreamdialog.cpp
   src/dialogs/userpassdialog.cpp
   src/dialogs/deleteconfirmationdialog.cpp
@@ -834,6 +837,7 @@ set(SOURCES
   src/widgets/sliderslider.cpp
   src/widgets/prettyslider.cpp
   src/widgets/volumeslider.cpp
+  src/widgets/signalpathwidget.cpp
   src/widgets/stickyslider.cpp
   src/widgets/stretchheaderview.cpp
   src/widgets/trackslider.cpp
@@ -857,6 +861,7 @@ set(SOURCES
   src/streaming/streamingservices.cpp
   src/streaming/streamingservice.cpp
   src/streaming/playlistimport.cpp
+  src/streaming/playlistimportdialog.cpp
   src/streaming/streamserviceplaylistitem.cpp
   src/streaming/streamingsearchview.cpp
   src/streaming/streamingsearchmodel.cpp
@@ -977,6 +982,7 @@ set(HEADERS
 
   src/engine/enginebase.h
   src/engine/signalpath.h
+  src/engine/directalsa.h
   src/engine/audiodevicelisters.h
   src/engine/gstengine.h
   src/engine/gstenginepipeline.h
@@ -1121,6 +1127,8 @@ set(HEADERS
 
   src/dialogs/aboutdialog.h
   src/dialogs/errordialog.h
+  src/dialogs/signalpathdialog.h
+  src/dialogs/directalsadialog.h
   src/dialogs/console.h
   src/dialogs/addstreamdialog.h
   src/dialogs/userpassdialog.h
@@ -1145,6 +1153,7 @@ set(HEADERS
   src/widgets/sliderslider.h
   src/widgets/prettyslider.h
   src/widgets/volumeslider.h
+  src/widgets/signalpathwidget.h
   src/widgets/stickyslider.h
   src/widgets/stretchheaderview.h
   src/widgets/trackslider.h
@@ -1169,6 +1178,7 @@ set(HEADERS
   src/streaming/streamingservices.h
   src/streaming/streamingservice.h
   src/streaming/playlistimport.h
+  src/streaming/playlistimportdialog.h
   src/streaming/streamsongmimedata.h
   src/streaming/streamingsearchmodel.h
   src/streaming/streamingsearchsortmodel.h
@@ -1661,6 +1671,7 @@ if(HAVE_TIDAL)
     src/tidal/tidalurlhandler.cpp
     src/tidal/tidalbaserequest.cpp
     src/tidal/tidalrequest.cpp
+    src/tidal/tidalplaylistsource.cpp
     src/tidal/tidalstreamurlrequest.cpp
     src/tidal/tidalfavoriterequest.cpp
     src/settings/tidalsettingspage.cpp
@@ -1671,6 +1682,7 @@ if(HAVE_TIDAL)
     src/tidal/tidalurlhandler.h
     src/tidal/tidalbaserequest.h
     src/tidal/tidalrequest.h
+    src/tidal/tidalplaylistsource.h
     src/tidal/tidalstreamurlrequest.h
     src/tidal/tidalfavoriterequest.h
     src/settings/tidalsettingspage.h
@@ -1711,6 +1723,7 @@ if(HAVE_QOBUZ)
     src/qobuz/qobuzurlhandler.cpp
     src/qobuz/qobuzbaserequest.cpp
     src/qobuz/qobuzrequest.cpp
+    src/qobuz/qobuzplaylistsource.cpp
     src/qobuz/qobuzstreamurlrequest.cpp
     src/qobuz/qobuzfavoriterequest.cpp
     src/qobuz/qobuzmetadatarequest.cpp
@@ -1723,6 +1736,7 @@ if(HAVE_QOBUZ)
     src/qobuz/qobuzurlhandler.h
     src/qobuz/qobuzbaserequest.h
     src/qobuz/qobuzrequest.h
+    src/qobuz/qobuzplaylistsource.h
     src/qobuz/qobuzstreamurlrequest.h
     src/qobuz/qobuzfavoriterequest.h
     src/qobuz/qobuzmetadatarequest.h

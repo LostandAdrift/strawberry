@@ -27,12 +27,15 @@
 #include <QString>
 
 #include "includes/shared_ptr.h"
+#include "engine/directalsa.h"
 #include "settingspage.h"
 
 class SettingsDialog;
 class Ui_BackendSettingsPage;
 class Player;
 class AudioDeviceListers;
+
+class QPushButton;
 
 class BackendSettingsPage : public SettingsPage {
   Q_OBJECT
@@ -63,6 +66,7 @@ class BackendSettingsPage : public SettingsPage {
   void radiobutton_alsa_plughw_clicked(const bool checked);
   void radiobutton_alsa_pcm_clicked(const bool checked);
   void FadingOptionsChanged();
+  void ShowDirectAlsaDialog();
   void BufferDefaults();
 
  private:
@@ -72,6 +76,8 @@ class BackendSettingsPage : public SettingsPage {
   void SwitchALSADevices(const ALSAPluginType alsa_plugin_type);
 #endif
   void SelectDevice(const QString &device_new);
+  DirectAlsa::Settings CollectDirectAlsaSettings() const;
+  void ApplyDirectAlsaSettings(const DirectAlsa::Settings &settings);
 
  private:
   Ui_BackendSettingsPage *ui_;
@@ -79,6 +85,10 @@ class BackendSettingsPage : public SettingsPage {
   const SharedPtr<AudioDeviceListers> audio_device_listers_;
 
   bool configloaded_;
+
+  QPushButton *button_direct_alsa_;
+  QString pending_direct_alsa_backup_;
+  bool clear_direct_alsa_backup_;
 
   QString output_current_;
   QVariant device_current_;

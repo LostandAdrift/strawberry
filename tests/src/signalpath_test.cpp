@@ -108,9 +108,11 @@ TEST(SignalPathTest, NeverClaimsBitPerfect) {
   EXPECT_FALSE(report.verdict.contains(QStringLiteral("bit-perfect"), Qt::CaseInsensitive));
   EXPECT_FALSE(report.verdict.contains(QStringLiteral("bit perfect"), Qt::CaseInsensitive));
   EXPECT_FALSE(report.description.contains(QStringLiteral("bit-perfect"), Qt::CaseInsensitive));
-  EXPECT_TRUE(report.verdict.contains(QStringLiteral("not verified")));
+  EXPECT_TRUE(report.verdict.contains(QStringLiteral("Not verified")));
   EXPECT_FALSE(report.caveats.isEmpty());
-  EXPECT_EQ(QStringLiteral("FLAC 24/96 · Hi-Res"), report.badge);
+  EXPECT_EQ(QStringLiteral("FLAC 24/96 · Direct ALSA"), report.badge);
+  EXPECT_EQ(QStringLiteral("App DSP off"), report.dsp_text);
+  EXPECT_EQ(Tier::HiRes, report.tier);
 
 }
 
@@ -124,7 +126,8 @@ TEST(SignalPathTest, UnityVolumeDoesNotAlter) {
   config.volume_percent = 99;
   const Report attenuated = Analyze(Flac(16, 44100), config);
   EXPECT_FALSE(attenuated.unaltered_configuration());
-  EXPECT_TRUE(attenuated.verdict.contains(QStringLiteral("Volume")));
+  EXPECT_TRUE(attenuated.dsp_verdict.contains(QStringLiteral("Volume")));
+  EXPECT_EQ(QStringLiteral("App DSP on"), attenuated.dsp_text);
 
   config.volume_percent = 40;
   config.volume_control = false;  // volume stage is not in the path at all
@@ -159,7 +162,8 @@ TEST(SignalPathTest, EachProcessingStageIsReported) {
     const Report report = Analyze(Flac(16, 44100), config);
     EXPECT_FALSE(report.unaltered_configuration()) << test.expected;
     EXPECT_TRUE(report.alterations.contains(QString::fromLatin1(test.expected))) << test.expected;
-    EXPECT_TRUE(report.verdict.startsWith(QStringLiteral("Altered by"))) << test.expected;
+    EXPECT_TRUE(report.dsp_verdict.startsWith(QStringLiteral("Altered by"))) << test.expected;
+    EXPECT_EQ(QStringLiteral("App DSP on"), report.dsp_text) << test.expected;
   }
 
 }
@@ -188,12 +192,12 @@ TEST(SignalPathTest, LossySourceAndUnknownSource) {
   mp3.bitrate = 320;
   const Report lossy = Analyze(mp3, DirectAlsa());
   EXPECT_EQ(Tier::Lossy, lossy.tier);
-  EXPECT_EQ(QStringLiteral("MP3 · Lossy"), lossy.badge);
-  EXPECT_TRUE(lossy.description.contains(QStringLiteral("320 kbps")));
+  EXPECT_EQ(QStringLiteral("MP3 · Direct ALSA"), lossy.badge);
+  EXPECT_TRUE(lossy.technical_text.contains(QStringLiteral("320 kbps")));
 
   const Report unknown = Analyze(Source(), DirectAlsa());
   EXPECT_EQ(Tier::Unknown, unknown.tier);
-  EXPECT_EQ(QStringLiteral("Quality unknown"), unknown.badge);
+  EXPECT_EQ(QStringLiteral("Source unknown · Direct ALSA"), unknown.badge);
   EXPECT_TRUE(unknown.caveats.join(QString()).contains(QStringLiteral("did not report")));
 
 }
@@ -234,5 +238,93 @@ TEST(SignalPathTest, SourceFromSong) {
   odd.set_bitdepth(-1);
   odd.set_samplerate(-1);
   EXPECT_EQ(Tier::Lossless, TierForSource(SourceFromSong(odd)));
+
+}
+
+TEST(SignalPathTest, MuteIsIgnoredWithoutVolumeControl) {
+
+  // The engine only mutes through its volume element, which does not exist when volume control is disabled.
+  Config config = DirectAlsa();
+  config.volume_control = false;
+  config.muted = true;
+  config.volume_percent = 10;
+  const Report report = Analyze(Flac(16, 44100), config);
+  EXPECT_TRUE(report.unaltered_configuration());
+  EXPECT_EQ(QStringLiteral("App DSP off"), report.dsp_text);
+  EXPECT_TRUE(report.technical_text.contains(QStringLiteral("mute has no effect")));
+
+  config.volume_control = true;
+  EXPECT_FALSE(Analyze(Flac(16, 44100), config).unaltered_configuration());
+
+}
+
+TEST(SignalPathTest, AppDspAndOutputCertaintyAreSeparateStatements) {
+
+  Config config;
+  config.output = QStringLiteral("pulsesink");
+  config.volume_percent = 100;
+  const Report report = Analyze(Flac(16, 44100), config);
+
+  // App DSP is off, but the system mixer is in the path: the badge must not read as an all-clear.
+  EXPECT_EQ(QStringLiteral("FLAC 16/44.1 · System mixer"), report.badge);
+  EXPECT_EQ(QStringLiteral("App DSP off"), report.dsp_text);
+  EXPECT_TRUE(report.dsp_verdict.startsWith(QStringLiteral("App DSP off")));
+  EXPECT_TRUE(report.output_verdict.contains(QStringLiteral("system mixer")));
+  EXPECT_FALSE(report.output_verdict.contains(QStringLiteral("no processing"), Qt::CaseInsensitive));
+  EXPECT_FALSE(report.badge.contains(QStringLiteral("no processing"), Qt::CaseInsensitive));
+
+}
+
+TEST(SignalPathTest, OutputLabels) {
+
+  Config config;
+  config.volume_percent = 100;
+  config.output = QStringLiteral("alsasink");
+  config.device = QStringLiteral("plughw:0,0");
+  EXPECT_EQ(QStringLiteral("ALSA plugin"), Analyze(Flac(16, 44100), config).output_text);
+  config.output = QStringLiteral("autoaudiosink");
+  EXPECT_EQ(QStringLiteral("Auto output"), Analyze(Flac(16, 44100), config).output_text);
+  config.output = QStringLiteral("osssink");
+  EXPECT_EQ(QStringLiteral("osssink"), Analyze(Flac(16, 44100), config).output_text);
+
+}
+
+TEST(SignalPathTest, UnknownSourceIsPreservedUntilMetadataArrives) {
+
+  // A stream before its metadata arrives: no format, no numbers.
+  Source pending;
+  pending.format = QStringLiteral("Stream");
+  Report early = Analyze(pending, DirectAlsa());
+  EXPECT_EQ(QStringLiteral("Source unknown"), early.source_text);
+  EXPECT_EQ(Tier::Unknown, early.tier);
+
+  // The same track once the decoder reported its format.
+  Report later = Analyze(Flac(24, 96000), DirectAlsa());
+  EXPECT_EQ(QStringLiteral("FLAC 24/96"), later.source_text);
+
+  // Partial information is shown as far as it goes, with no invented tier.
+  Source partial;
+  partial.samplerate = 48000;
+  const Report partial_report = Analyze(partial, DirectAlsa());
+  EXPECT_EQ(QStringLiteral("48"), partial_report.source_text.section(u' ', 0, 0));
+  EXPECT_EQ(Tier::Unknown, partial_report.tier);
+
+}
+
+TEST(SignalPathTest, SectionsAndTechnicalText) {
+
+  Config config = DirectAlsa();
+  config.equalizer = true;
+  Source source = Flac(24, 96000);
+  source.origin = QStringLiteral("Tidal");
+  const Report report = Analyze(source, config);
+
+  EXPECT_FALSE(report.source_rows.isEmpty());
+  EXPECT_FALSE(report.processing_rows.isEmpty());
+  EXPECT_FALSE(report.output_rows.isEmpty());
+  EXPECT_TRUE(report.technical_text.contains(QStringLiteral("Equalizer: On")));
+  EXPECT_TRUE(report.technical_text.contains(QStringLiteral("Origin: Tidal")));
+  EXPECT_TRUE(report.technical_text.contains(QStringLiteral("hw:CARD=Example,DEV=0")));
+  EXPECT_TRUE(report.technical_text.contains(QStringLiteral("does not prove bit-perfect")));
 
 }

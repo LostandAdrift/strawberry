@@ -98,7 +98,15 @@ endmacro(add_test_file)
 
 add_test_file(src/themepalette_test.cpp false)
 add_test_file(src/signalpath_test.cpp false)
-add_test_file(src/playlistimport_test.cpp false)
+add_test_file(src/directalsa_test.cpp true)
+add_test_file(src/signalpathwidget_test.cpp true)
+
+# Renders the real Adrift widgets and dialogs to PNG files for visual review. Set -DADRIFT_SCREENSHOT_DIR=<dir> to keep the images.
+set(ADRIFT_SCREENSHOT_DIR "" CACHE PATH "Directory where adrift_render_test saves PNG renders (empty: render and check, but do not save)")
+add_test_file(src/adrift_render_test.cpp true)
+target_compile_definitions(adrift_render_test PRIVATE ADRIFT_SCREENSHOT_DIR="${ADRIFT_SCREENSHOT_DIR}")
+set_tests_properties(adrift_render_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_test_file(src/playlistimport_test.cpp true)
 add_test_file(src/utilities_test.cpp false)
 add_test_file(src/networkproxyfactory_test.cpp false)
 add_test_file(src/temporaryfile_test.cpp false)
