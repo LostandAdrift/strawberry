@@ -202,6 +202,7 @@ class MainWindow : public QMainWindow, public PlatformInterface {
   void StopAfterCurrent();
 
   void SongChanged(const Song &song);
+  void UpdateSignalPath();
   void MuteChanged(const bool mute);
 
   void CopyFilesToCollection(const QList<QUrl> &urls);

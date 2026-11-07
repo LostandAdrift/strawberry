@@ -45,6 +45,10 @@ constexpr char kSystemThemeIcons[] = "system_icons";
 constexpr char kDarkMode[] = "dark_mode";
 constexpr char kUseCustomColorSet[] = "use-custom-color-set";
 
+// Named color theme: "system", "adrift-dark" or "omarchy". Resolved at startup so the Omarchy theme tracks the desktop.
+constexpr char kColorTheme[] = "color_theme";
+constexpr char kDefaultColorTheme[] = "system";
+
 // Per-QPalette-role custom colors (the "central roles" from https://doc.qt.io/qt-6/qpalette.html).
 constexpr char kColorWindow[] = "color-window";
 constexpr char kColorWindowText[] = "color-window-text";

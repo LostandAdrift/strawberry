@@ -545,6 +545,7 @@ set(SOURCES
   src/core/jsonbaserequest.cpp
   src/core/oauthenticator.cpp
   src/core/appearance.cpp
+  src/core/themepalette.cpp
 
   src/utilities/strutils.cpp
   src/utilities/envutils.cpp
@@ -635,6 +636,7 @@ set(SOURCES
   src/filterparser/filterparseruintnecomparator.cpp
 
   src/engine/enginebase.cpp
+  src/engine/signalpath.cpp
   src/engine/enginedevice.cpp
   src/engine/audiodevicelisters.cpp
   src/engine/audiodevicelister.cpp
@@ -959,6 +961,7 @@ set(HEADERS
   src/core/jsonbaserequest.h
   src/core/oauthenticator.h
   src/core/appearance.h
+  src/core/themepalette.h
 
   src/credentialsmanager/credentialsmanager.h
   src/credentialsmanager/credentialsreply.h
@@ -972,6 +975,7 @@ set(HEADERS
   src/tagreader/tagreaderloadcoverimagereply.h
 
   src/engine/enginebase.h
+  src/engine/signalpath.h
   src/engine/audiodevicelisters.h
   src/engine/gstengine.h
   src/engine/gstenginepipeline.h

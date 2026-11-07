@@ -29,6 +29,7 @@
 
 #include "settings.h"
 #include "appearance.h"
+#include "themepalette.h"
 #include "constants/appearancesettings.h"
 
 Appearance::Appearance(QObject *parent) : QObject(parent), system_palette_(QApplication::palette()) {}
@@ -108,8 +109,15 @@ void Appearance::LoadCustomPaletteColors() {
   Settings s;
   s.beginGroup(AppearanceSettings::kSettingsGroup);
   const bool use_custom_color_set = s.value(AppearanceSettings::kUseCustomColorSet).toBool();
+  const ThemePalette::Theme theme = ThemePalette::ThemeFromString(s.value(AppearanceSettings::kColorTheme, QLatin1String(AppearanceSettings::kDefaultColorTheme)).toString());
 
-  if (use_custom_color_set) {
+  // A named theme takes precedence over the custom color set.
+  // If the theme cannot be resolved (e.g. Omarchy is not installed) fall through to the custom/system colors.
+  const QMap<QPalette::ColorRole, QColor> theme_colors = ThemePalette::ColorsForTheme(theme);
+  if (!theme_colors.isEmpty()) {
+    SetCustomPaletteColors(theme_colors);
+  }
+  else if (use_custom_color_set) {
     QMap<QPalette::ColorRole, QColor> colors;
     for (const ColorRole &color_role : ColorRoles()) {
       const QVariant value = s.value(color_role.settings_key);

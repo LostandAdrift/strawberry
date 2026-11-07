@@ -43,6 +43,7 @@
 #  include "constants/spotifysettings.h"
 #endif
 #include "core/song.h"
+#include "engine/signalpath.h"
 
 class EngineBase : public QObject {
   Q_OBJECT
@@ -155,6 +156,12 @@ class EngineBase : public QObject {
   static const int kScopeSize = 1024;
 
   QVariant device() { return device_; }
+
+  // Snapshot of the configured processing and output, used for the signal path display.
+  // This reflects settings, not what the sound server or hardware does.
+  SignalPath::Config signal_path_config() const;
+
+  virtual bool IsStereoBalancerEnabled() const { return false; }
 
  public Q_SLOTS:
   virtual void SetStereoBalancerEnabled(const bool enabled) { Q_UNUSED(enabled) }

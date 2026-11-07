@@ -96,6 +96,8 @@ macro(add_test_file test_source gui_required)
     add_dependencies(build_tests ${TEST_NAME})
 endmacro(add_test_file)
 
+add_test_file(src/themepalette_test.cpp false)
+add_test_file(src/signalpath_test.cpp false)
 add_test_file(src/utilities_test.cpp false)
 add_test_file(src/networkproxyfactory_test.cpp false)
 add_test_file(src/temporaryfile_test.cpp false)

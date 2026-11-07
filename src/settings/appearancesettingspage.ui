@@ -81,6 +81,40 @@
      </property>
      <layout class="QVBoxLayout" name="layout_colors">
       <item>
+       <layout class="QHBoxLayout" name="layout_color_theme">
+        <item>
+         <widget class="QLabel" name="label_color_theme">
+          <property name="text">
+           <string>Color theme:</string>
+          </property>
+          <property name="buddy">
+           <cstring>combobox_color_theme</cstring>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QComboBox" name="combobox_color_theme">
+          <property name="toolTip">
+           <string>Named themes override the color set below. Omarchy follows the current desktop theme and falls back to the system colors if none is found.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="spacer_color_theme">
+          <property name="orientation">
+           <enum>Qt::Horizontal</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>40</width>
+            <height>20</height>
+           </size>
+          </property>
+         </spacer>
+        </item>
+       </layout>
+      </item>
+      <item>
        <widget class="QRadioButton" name="use_system_color_set">
         <property name="text">
          <string>&amp;Use the system default color set</string>

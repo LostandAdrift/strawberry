@@ -319,3 +319,23 @@ void EngineBase::UpdateSpotifyAccessToken(const QString &spotify_access_token) {
 #endif  // HAVE_SPOTIFY
 
 }
+
+SignalPath::Config EngineBase::signal_path_config() const {
+
+  SignalPath::Config config;
+  config.output = output_;
+  config.device = device_.metaType().id() == QMetaType::QString ? device_.toString() : QString();
+  config.exclusive_mode = exclusive_mode_;
+  config.volume_control = volume_control_;
+  config.volume_percent = static_cast<int>(volume_);
+  config.muted = muted_;
+  config.replaygain = rg_enabled_;
+  config.ebur128 = ebur128_loudness_normalization_;
+  config.equalizer = equalizer_enabled_;
+  config.stereo_balancer = IsStereoBalancerEnabled();
+  config.bs2b = bs2b_enabled_;
+  config.channels_forced = channels_enabled_;
+  config.fade_or_crossfade = fadeout_enabled_ || crossfade_enabled_ || autocrossfade_enabled_;
+  return config;
+
+}

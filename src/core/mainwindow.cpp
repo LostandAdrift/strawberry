@@ -150,6 +150,7 @@
 #include "playlistparsers/playlistparser.h"
 #include "analyzer/analyzercontainer.h"
 #include "equalizer/equalizer.h"
+#include "engine/signalpath.h"
 #ifdef HAVE_GLOBALSHORTCUTS
 #  include "globalshortcuts/globalshortcutsmanager.h"
 #endif
@@ -653,6 +654,10 @@ MainWindow::MainWindow(Application *app,
   QObject::connect(ui_->action_add_stream, &QAction::triggered, this, &MainWindow::AddStream);
   QObject::connect(ui_->action_cover_manager, &QAction::triggered, this, &MainWindow::ShowCoverManager);
   QObject::connect(ui_->action_equalizer, &QAction::triggered, this, &MainWindow::ShowEqualizer);
+  QObject::connect(&*app_->player()->engine(), &EngineBase::StateChanged, this, &MainWindow::UpdateSignalPath);
+  QObject::connect(&*app_->player()->engine(), &EngineBase::VolumeChanged, this, &MainWindow::UpdateSignalPath);
+  QObject::connect(&*equalizer_, &Equalizer::EqualizerEnabledChanged, this, &MainWindow::UpdateSignalPath);
+  QObject::connect(&*equalizer_, &Equalizer::StereoBalancerEnabledChanged, this, &MainWindow::UpdateSignalPath);
   QObject::connect(ui_->action_transcoder, &QAction::triggered, this, &MainWindow::ShowTranscodeDialog);
   QObject::connect(ui_->action_jump, &QAction::triggered, ui_->playlist->view(), &PlaylistView::JumpToCurrentlyPlayingTrack);
   QObject::connect(ui_->action_update_collection, &QAction::triggered, &*app_->collection(), &CollectionManager::IncrementalScan);
@@ -1328,6 +1333,9 @@ void MainWindow::ReloadSettings() {
     }
   }
 
+  // The engine reloads its own settings; refresh the signal path once that has happened.
+  QTimer::singleShot(0, this, &MainWindow::UpdateSignalPath);
+
   s.beginGroup(PlaylistSettings::kSettingsGroup);
   delete_files_ = s.value(PlaylistSettings::kDeleteFiles, PlaylistSettings::kDefaultDeleteFiles).toBool();
   s.endGroup();
@@ -1691,8 +1699,32 @@ void MainWindow::SendNowPlaying() {
 
 }
 
+void MainWindow::UpdateSignalPath() {
+
+  if (!app_->player() || !app_->player()->engine()) return;
+
+  const EngineBase::State state = app_->player()->engine()->state();
+  if (state != EngineBase::State::Playing && state != EngineBase::State::Paused) {
+    ui_->label_signal_path->clear();
+    ui_->label_signal_path->setToolTip(QString());
+    ui_->label_signal_path->setAccessibleDescription(QString());
+    return;
+  }
+
+  const SignalPath::Report report = SignalPath::Analyze(SignalPath::SourceFromSong(song_playing_), app_->player()->engine()->signal_path_config());
+
+  // The text carries the information; color is never the only signal.
+  QString text = report.badge;
+  text += report.unaltered_configuration() ? QStringLiteral(" · ") + tr("no processing") : QStringLiteral(" · ") + tr("processed");
+  ui_->label_signal_path->setText(text);
+  ui_->label_signal_path->setToolTip(report.description.toHtmlEscaped().replace(u'\n', "<br>"_L1));
+  ui_->label_signal_path->setAccessibleDescription(report.description);
+
+}
+
 void MainWindow::MuteChanged(const bool mute) {
 
+  UpdateSignalPath();
   ui_->action_mute->setChecked(mute);
   systemtrayicon_->MuteButtonStateChanged(mute);
   ui_->volume->SetMuted(mute);
@@ -1705,6 +1737,7 @@ void MainWindow::SongChanged(const Song &song) {
 
   song_playing_ = song;
   song_ = song;
+  UpdateSignalPath();
   setWindowTitle(song.PrettyTitleWithArtist());
   systemtrayicon_->SetProgress(0);
 

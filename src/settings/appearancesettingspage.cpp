@@ -56,6 +56,7 @@
 #include "core/stylehelper.h"
 #include "core/settings.h"
 #include "core/appearance.h"
+#include "core/themepalette.h"
 #include "widgets/fancytabwidget.h"
 #include "settingspage.h"
 #include "settingsdialog.h"
@@ -69,7 +70,7 @@ AppearanceSettingsPage::AppearanceSettingsPage(SettingsDialog *dialog, SharedPtr
       ui_(new Ui_AppearanceSettingsPage),
       appearance_(appearance),
       original_style_(QApplication::style() ? QApplication::style()->objectName() : QString()),
-      system_palette_(QApplication::palette()),
+      system_palette_(appearance ? appearance->system_palette() : QApplication::palette()),
       original_dark_mode_(false),
       original_use_custom_color_set_(false),
       background_image_type_(BackgroundImageType::Default) {
@@ -85,6 +86,10 @@ AppearanceSettingsPage::AppearanceSettingsPage(SettingsDialog *dialog, SharedPtr
 
   CreateColorSelectors();
 
+  ui_->combobox_color_theme->addItem(tr("System"), ThemePalette::ThemeToString(ThemePalette::Theme::System));
+  ui_->combobox_color_theme->addItem(tr("Adrift Dark"), ThemePalette::ThemeToString(ThemePalette::Theme::AdriftDark));
+  ui_->combobox_color_theme->addItem(tr("Omarchy (follow desktop theme)"), ThemePalette::ThemeToString(ThemePalette::Theme::Omarchy));
+
   ui_->combobox_background_image_position->setItemData(0, static_cast<int>(BackgroundImagePosition::UpperLeft));
   ui_->combobox_background_image_position->setItemData(1, static_cast<int>(BackgroundImagePosition::UpperRight));
   ui_->combobox_background_image_position->setItemData(2, static_cast<int>(BackgroundImagePosition::Middle));
@@ -92,6 +97,7 @@ AppearanceSettingsPage::AppearanceSettingsPage(SettingsDialog *dialog, SharedPtr
   ui_->combobox_background_image_position->setItemData(4, static_cast<int>(BackgroundImagePosition::BottomRight));
 
   QObject::connect(ui_->checkbox_dark_mode, &QCheckBox::toggled, this, &AppearanceSettingsPage::DarkModeToggled);
+  QObject::connect(ui_->combobox_color_theme, &QComboBox::currentIndexChanged, this, &AppearanceSettingsPage::ColorThemeChanged);
 
   QObject::connect(ui_->use_custom_color_set, &QRadioButton::toggled, this, &AppearanceSettingsPage::UseCustomColorSetOptionChanged);
   QObject::connect(ui_->use_custom_color_set, &QRadioButton::toggled, ui_->widget_custom_colors, &QWidget::setEnabled);
@@ -155,6 +161,13 @@ void AppearanceSettingsPage::Load() {
   ui_->checkbox_dark_mode->setChecked(original_dark_mode_);
 
   // Colors
+  original_color_theme_ = s.value(kColorTheme, QLatin1String(kDefaultColorTheme)).toString();
+  {
+    const QSignalBlocker blocker(ui_->combobox_color_theme);
+    const int theme_index = ui_->combobox_color_theme->findData(ThemePalette::ThemeToString(ThemePalette::ThemeFromString(original_color_theme_)));
+    ui_->combobox_color_theme->setCurrentIndex(theme_index >= 0 ? theme_index : 0);
+  }
+
   const QPalette palette = QApplication::palette();
 
   // Keep in mind originals colors, in case the user clicks on Cancel, to be able to restore colors
@@ -289,6 +302,11 @@ void AppearanceSettingsPage::Save() {
   s.setValue(kDarkMode, Utilities::StyleHasDarkModeSupport(selected_style) ? ui_->checkbox_dark_mode->isChecked() : false);
 
   // Colors
+  const QString color_theme = ui_->combobox_color_theme->currentData().toString();
+  s.setValue(kColorTheme, color_theme);
+  original_color_theme_ = color_theme;
+  const bool theme_active = ThemePalette::ThemeFromString(color_theme) != ThemePalette::Theme::System;
+
   const bool use_custom_color_set = Utilities::StyleHasCustomPaletteColorsSupport(selected_style) && ui_->use_custom_color_set->isChecked();
   s.setValue(kUseCustomColorSet, use_custom_color_set);
   if (use_custom_color_set) {
@@ -297,7 +315,7 @@ void AppearanceSettingsPage::Save() {
     }
   }
   else {
-    QApplication::setPalette(system_palette_);
+    if (!theme_active) QApplication::setPalette(system_palette_);
     for (const Appearance::ColorRole &color_role : Appearance::ColorRoles()) {
       s.remove(color_role.settings_key);
     }
@@ -376,12 +394,7 @@ void AppearanceSettingsPage::Cancel() {
   QGuiApplication::styleHints()->setColorScheme(original_dark_mode_ ? Qt::ColorScheme::Dark : Qt::ColorScheme::Unknown);
 #endif
 
-  if (original_use_custom_color_set_) {
-    Appearance::SetCustomPaletteColors(original_colors_);
-  }
-  else {
-    QApplication::setPalette(system_palette_);
-  }
+  ApplyColorTheme(original_color_theme_, original_use_custom_color_set_, original_colors_);
 
   background_image_filename_ = original_background_image_filename_;
   current_tabbar_bg_color_ = original_tabbar_bg_color_;
@@ -436,9 +449,7 @@ void AppearanceSettingsPage::SetStyle(const QString &new_style, const bool apply
   if (style_changed) {
     QApplication::setPalette(QPalette());
     system_palette_ = QApplication::palette();
-    if (ui_->use_custom_color_set->isChecked()) {
-      ApplyCustomColors();
-    }
+    ApplyColorTheme(ui_->combobox_color_theme->currentData().toString(), ui_->use_custom_color_set->isChecked(), current_colors_);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
     QGuiApplication::styleHints()->setColorScheme(dark_mode_support && ui_->checkbox_dark_mode->isChecked() ? Qt::ColorScheme::Dark : Qt::ColorScheme::Unknown);
 #endif
@@ -464,6 +475,29 @@ bool AppearanceSettingsPage::ApplyStyle(const QString &current_style, const QStr
   }
 
   return false;
+
+}
+
+void AppearanceSettingsPage::ApplyColorTheme(const QString &theme_name, const bool use_custom_color_set, const QMap<QPalette::ColorRole, QColor> &custom_colors) {
+
+  // Always start from the untouched system palette so switching themes never stacks colors.
+  QApplication::setPalette(system_palette_);
+
+  const QMap<QPalette::ColorRole, QColor> theme_colors = ThemePalette::ColorsForTheme(ThemePalette::ThemeFromString(theme_name));
+  if (!theme_colors.isEmpty()) {
+    Appearance::SetCustomPaletteColors(theme_colors);
+  }
+  else if (use_custom_color_set) {
+    Appearance::SetCustomPaletteColors(custom_colors);
+  }
+
+}
+
+void AppearanceSettingsPage::ColorThemeChanged(const int index) {
+
+  Q_UNUSED(index)
+  ApplyColorTheme(ui_->combobox_color_theme->currentData().toString(), ui_->use_custom_color_set->isChecked(), current_colors_);
+  set_changed();
 
 }
 

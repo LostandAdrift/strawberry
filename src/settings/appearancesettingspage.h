@@ -59,6 +59,8 @@ class AppearanceSettingsPage : public SettingsPage {
   void DarkModeToggled(const bool checked);
   void UseCustomColorSetOptionChanged(const bool checked);
   void SetDarkColors();
+  void ColorThemeChanged(const int index);
+  void ApplyColorTheme(const QString &theme_name, const bool use_custom_color_set, const QMap<QPalette::ColorRole, QColor> &custom_colors);
   void ResetToDefaultColors();
   void SelectBackgroundImage();
   void BackgroundImageBlurLevelChanged(const int value);
@@ -94,6 +96,7 @@ class AppearanceSettingsPage : public SettingsPage {
   QString original_style_;
   QPalette system_palette_;
   bool original_dark_mode_;
+  QString original_color_theme_;
   bool original_use_custom_color_set_;
   QMap<QPalette::ColorRole, QColor> original_colors_;
   QMap<QPalette::ColorRole, QColor> current_colors_;

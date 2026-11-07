@@ -86,6 +86,7 @@ class GstEngine : public EngineBase, public GstBufferConsumer {
   bool CustomDeviceSupport(const QString &output) const override;
   bool ALSADeviceSupport(const QString &output) const override;
   bool ExclusiveModeSupport(const QString &output) const override;
+  bool IsStereoBalancerEnabled() const override { return stereo_balancer_enabled_; }
   bool FadingSupport(const QString &output) const override;
 
   void ConsumeBuffer(GstBuffer *buffer, const int pipeline_id, const QString &format) override;
