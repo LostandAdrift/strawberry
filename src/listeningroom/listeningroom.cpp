@@ -250,7 +250,7 @@ class PlaylistCardDelegate : public QStyledItemDelegate {
     const int right = row.right() - 16;
     QString badge;
     if (playing) badge = QCoreApplication::translate("ListeningRoom", "Playing");
-    else if (current) badge = QCoreApplication::translate("ListeningRoom", "In queue");
+    else if (current) badge = QCoreApplication::translate("ListeningRoom", "Shown");
     int badge_width = 0;
     if (!badge.isEmpty()) {
       badge_width = fm.horizontalAdvance(badge) + 20;
@@ -488,7 +488,6 @@ ListeningRoom::ListeningRoom(QWidget *parent)
       view_(View::Listening),
       compact_(false),
       state_(TransportBar::State::Stopped),
-      shuffle_active_(false),
       rail_(nullptr),
       button_listening_(nullptr),
       button_library_(nullptr),
@@ -759,7 +758,7 @@ void ListeningRoom::BuildListeningPage() {
   // Right: the queue, a view of the real playlist.
   QVBoxLayout *right = new QVBoxLayout;
   right->setSpacing(4);
-  label_queue_heading_ = MakeLabel(tr("Queue"), false);
+  label_queue_heading_ = MakeLabel(tr("Playlist"), false);
   Style(label_queue_heading_, RoomStyle::Label(font()), ElidedLabel::Tone::Faint);
   label_queue_sub_ = MakeLabel(QString(), false);
   Style(label_queue_sub_, RoomStyle::Scaled(font(), 1.15, true), ElidedLabel::Tone::Normal);
@@ -768,7 +767,7 @@ void ListeningRoom::BuildListeningPage() {
   button_queue_back_ = new RoomButton(tr("Show what is playing"));
   button_queue_back_->setVisible(false);
   QObject::connect(button_queue_back_, &QPushButton::clicked, this, &ListeningRoom::ShowPlayingQueueRequested);
-  queue_view_->SetEmptyText(tr("The queue is empty"), tr("Open a playlist, or add music from the Library."));
+  queue_view_->SetEmptyText(tr("This playlist is empty"), tr("Open a playlist, or add music from the Library."));
   queue_view_->setMinimumWidth(300);
 
   right->addWidget(label_queue_heading_);
@@ -792,7 +791,7 @@ void ListeningRoom::BuildPlaylistsPage() {
   button_playlists_import_ = new RoomButton(tr("Import from Tidal or Qobuz…"), true);
   button_playlists_import_->setToolTip(tr("Makes local copies of your streaming playlists. Nothing is changed on the service."));
   QObject::connect(button_playlists_import_, &QPushButton::clicked, this, [this]() { Q_EMIT ImportPlaylistsRequested(QString()); });
-  AddPageHeader(layout, font(), tr("Playlists"), tr("Your open playlists. Choose one to look at it in the queue."), button_playlists_import_);
+  AddPageHeader(layout, font(), tr("Playlists"), tr("Your open playlists. Choose one to browse its tracks."), button_playlists_import_);
 
   playlists_list_->setItemDelegate(new PlaylistCardDelegate(playlists_list_));
   playlists_list_->setFrameShape(QFrame::NoFrame);
@@ -869,7 +868,7 @@ void ListeningRoom::UpdateNowPlayingTexts() {
     switch (state_) {
       case TransportBar::State::Playing: status = tr("Now playing"); break;
       case TransportBar::State::Paused:  status = tr("Paused"); break;
-      case TransportBar::State::Stopped: status = tr("Up next"); break;
+      case TransportBar::State::Stopped: status = tr("Ready"); break;
     }
   }
   else status = tr("Ready");
@@ -887,6 +886,7 @@ void ListeningRoom::SetCover(const QImage &image) {
 void ListeningRoom::SetPlaybackState(const TransportBar::State state) {
 
   state_ = state;
+  UpdateQueueHeader();
   transport_->SetState(state);
   queue_model_->SetPlaybackActive(state != TransportBar::State::Stopped);
   UpdateNowPlayingTexts();
@@ -928,13 +928,6 @@ void ListeningRoom::SetQueuePlaylist(Playlist *playlist, const QString &name) {
 
 }
 
-void ListeningRoom::SetShuffleActive(const bool active) {
-
-  shuffle_active_ = active;
-  UpdateQueueHeader();
-
-}
-
 void ListeningRoom::SetQueueBrowsing(const QString &playing_name) {
 
   browsing_note_ = playing_name.isEmpty() ? QString() : tr("This is not the playlist that is playing. Playback continues from “%1”.").arg(playing_name);
@@ -951,12 +944,12 @@ void ListeningRoom::UpdateQueueHeader() {
   const int count = queue_model_->rowCount();
   const QString name = queue_model_->playlist_name();
   label_queue_sub_->setText(queue_model_->playlist() ? (name.isEmpty() ? Tracks(count) : QStringLiteral("%1 · %2").arg(name, Tracks(count))) : tr("No playlist"));
-  QStringList notes;
-  if (!browsing_note_.isEmpty()) notes << browsing_note_;
-  if (shuffle_active_ && count > 0 && browsing_note_.isEmpty()) notes << tr("Shuffle is on, so the next track may differ from this order.");
-  label_queue_note_->setText(notes.join(QLatin1Char(' ')));
-  label_queue_note_->setVisible(!notes.isEmpty());
-  button_queue_back_->setVisible(!browsing_note_.isEmpty());
+  // The heading says where the list comes from, not what plays next: "Playing from" the playlist that plays, "Browsing" another one.
+  const bool browsing = !browsing_note_.isEmpty();
+  label_queue_heading_->setText(browsing ? tr("Browsing") : (state_ != TransportBar::State::Stopped && queue_model_->playlist() ? tr("Playing from") : tr("Playlist")));
+  label_queue_note_->setText(browsing_note_);
+  label_queue_note_->setVisible(browsing);
+  button_queue_back_->setVisible(browsing);
 
 }
 

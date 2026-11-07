@@ -1895,8 +1895,6 @@ void MainWindow::SetupListeningRoom() {
   QObject::connect(&*manager, &PlaylistManager::PlaylistRenamed, this, &MainWindow::ScheduleRoomRefresh);
   QObject::connect(&*manager, &PlaylistManager::PlaylistChanged, this, &MainWindow::ScheduleRoomRefresh);
   QObject::connect(&*manager, &PlaylistManager::AllPlaylistsLoaded, this, &MainWindow::ScheduleRoomRefresh);
-  QObject::connect(manager->sequence(), &PlaylistSequence::ShuffleModeChanged, this, [this](const PlaylistSequence::ShuffleMode mode) { room_->SetShuffleActive(mode != PlaylistSequence::ShuffleMode::Off); });
-  room_->SetShuffleActive(manager->sequence()->shuffle_mode() != PlaylistSequence::ShuffleMode::Off);
 
   // Start state: the user's volume is shown, never set.
   room_->SetVolume(static_cast<int>(player->GetVolume()));

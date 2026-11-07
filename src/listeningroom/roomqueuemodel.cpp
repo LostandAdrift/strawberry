@@ -136,8 +136,8 @@ QVariant RoomQueueModel::data(const QModelIndex &index, const int role) const {
       return static_cast<int>(item->EffectiveMetadata().length_nanosec() / 1000000000LL);
     case IsCurrentRole:
       return playback_active_ && row == current;
-    case UpNextRole:
-      return current >= 0 && playback_active_ ? row - current : row + 1;
+    case PositionRole:
+      return row + 1;
     case UnavailableRole:
       return item->EffectiveMetadata().url().isEmpty();
     default:

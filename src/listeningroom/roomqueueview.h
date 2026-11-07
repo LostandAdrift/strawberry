@@ -31,8 +31,8 @@ class QPaintEvent;
 class QResizeEvent;
 class QShowEvent;
 
-// Compact queue rows: a gutter with the position (an equalizer glyph for the current track), title over artist, and the length.
-// The current track has an accent bar; played tracks are dimmed; the track after the current one is marked as next.
+// Compact playlist rows: a gutter with the position (an equalizer glyph for the current track), title over artist, and the length.
+// The current track has an accent bar. Every row shows its position in the playlist; no row is marked as next or played.
 class RoomQueueDelegate : public QStyledItemDelegate {
   Q_OBJECT
 

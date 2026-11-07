@@ -282,7 +282,7 @@ TEST(ListeningRoomTest, QueueIsAViewOfTheRealPlaylist) {
 
 }
 
-TEST(ListeningRoomTest, CurrentTrackAndUpNextOrderFollowPlayback) {
+TEST(ListeningRoomTest, CurrentTrackIsHighlightedAndPositionsStayStable) {
 
   RoomFixture::QueueFixture fixture(8);
   ListeningRoom room;
@@ -290,29 +290,76 @@ TEST(ListeningRoomTest, CurrentTrackAndUpNextOrderFollowPlayback) {
   room.SetQueuePlaylist(fixture.playlist(), QStringLiteral("Evening"));
   RoomQueueModel *model = room.queue_model();
 
-  // Not playing: the playlist remembers a current row, but nothing is "now playing" and nothing is marked as played.
+  // Not playing: the playlist may remember a current row, but nothing is "now playing".
   fixture.SetCurrent(3);
   for (int row = 0; row < model->rowCount(); ++row) EXPECT_FALSE(model->data(model->index(row), RoomQueueModel::IsCurrentRole).toBool()) << row;
-  EXPECT_EQ(1, model->data(model->index(0), RoomQueueModel::UpNextRole).toInt());
 
   room.SetPlaybackState(TransportBar::State::Playing);
   EXPECT_TRUE(model->data(model->index(3), RoomQueueModel::IsCurrentRole).toBool());
   EXPECT_FALSE(model->data(model->index(2), RoomQueueModel::IsCurrentRole).toBool());
-  EXPECT_EQ(-3, model->data(model->index(0), RoomQueueModel::UpNextRole).toInt());  // played
-  EXPECT_EQ(0, model->data(model->index(3), RoomQueueModel::UpNextRole).toInt());
-  EXPECT_EQ(1, model->data(model->index(4), RoomQueueModel::UpNextRole).toInt());   // next
-  EXPECT_EQ(2, model->data(model->index(5), RoomQueueModel::UpNextRole).toInt());
   EXPECT_EQ(3, model->current_row());
 
-  // The track changes: the highlight and the numbering move with it.
+  // The shown numbers are playlist positions. They do not change with the current track, because the playlist order says nothing about
+  // what plays next (explicit queueing, repeat and shuffle can change that).
+  for (int row = 0; row < model->rowCount(); ++row) EXPECT_EQ(row + 1, model->data(model->index(row), RoomQueueModel::PositionRole).toInt()) << row;
   fixture.SetCurrent(5);
   EXPECT_FALSE(model->data(model->index(3), RoomQueueModel::IsCurrentRole).toBool());
   EXPECT_TRUE(model->data(model->index(5), RoomQueueModel::IsCurrentRole).toBool());
-  EXPECT_EQ(1, model->data(model->index(6), RoomQueueModel::UpNextRole).toInt());
+  for (int row = 0; row < model->rowCount(); ++row) EXPECT_EQ(row + 1, model->data(model->index(row), RoomQueueModel::PositionRole).toInt()) << row;
 
-  // Stopping removes the highlight again.
+  // Stopping removes the highlight.
   room.SetPlaybackState(TransportBar::State::Stopped);
   EXPECT_FALSE(model->data(model->index(5), RoomQueueModel::IsCurrentRole).toBool());
+
+}
+
+TEST(ListeningRoomTest, HeadingSaysWhereTheListComesFromNotWhatIsNext) {
+
+  RoomFixture::QueueFixture playing(8, 1);
+  RoomFixture::QueueFixture other(5, 2);
+  ListeningRoom room;
+  ShowAt(room, 1440, 900);
+
+  auto heading = [&room]() {
+    for (const QLabel *label : room.findChildren<QLabel*>()) {
+      if (label->isVisible() && (label->text() == QStringLiteral("Playing from") || label->text() == QStringLiteral("Browsing") || label->text() == QStringLiteral("Playlist"))) return label->text();
+    }
+    return QString();
+  };
+  auto mentions_order = [&room]() {
+    for (const QLabel *label : room.findChildren<QLabel*>()) {
+      const QString text = label->text().toLower();
+      if (label->isVisible() && (text.contains(QStringLiteral("up next")) || text == QStringLiteral("queue") || text.contains(QStringLiteral("next track")))) return true;
+    }
+    return false;
+  };
+
+  // Nothing plays: it is just the selected playlist.
+  room.SetQueuePlaylist(playing.playlist(), QStringLiteral("Evening"));
+  EXPECT_EQ(QStringLiteral("Playlist"), heading());
+
+  // Playing: "Playing from".
+  room.SetPlaybackState(TransportBar::State::Playing);
+  EXPECT_EQ(QStringLiteral("Playing from"), heading());
+  room.SetPlaybackState(TransportBar::State::Paused);
+  EXPECT_EQ(QStringLiteral("Playing from"), heading());
+
+  // Another playlist while one plays: "Browsing".
+  room.SetPlaybackState(TransportBar::State::Playing);
+  room.SetQueuePlaylist(other.playlist(), QStringLiteral("Small Hours"));
+  room.SetQueueBrowsing(QStringLiteral("Evening"));
+  EXPECT_EQ(QStringLiteral("Browsing"), heading());
+
+  // Back to the playing one.
+  room.SetQueuePlaylist(playing.playlist(), QStringLiteral("Evening"));
+  room.SetQueueBrowsing(QString());
+  EXPECT_EQ(QStringLiteral("Playing from"), heading());
+
+  // No wording anywhere promises an order of what plays next, whatever the playlist, shuffle or repeat do.
+  EXPECT_FALSE(mentions_order());
+  room.SetPlaybackState(TransportBar::State::Stopped);
+  EXPECT_FALSE(mentions_order());
+  EXPECT_EQ(QStringLiteral("Ready"), room.status_label()->text());
 
 }
 
@@ -374,28 +421,6 @@ TEST(ListeningRoomTest, QueueSurvivesItsPlaylistBeingDestroyed) {
   // The playlist was closed and deleted: the queue empties instead of pointing at freed memory.
   EXPECT_EQ(0, room.queue_model()->rowCount());
   EXPECT_EQ(nullptr, room.queue_model()->playlist());
-
-}
-
-TEST(ListeningRoomTest, ShuffleIsAdmittedInTheQueueHeader) {
-
-  RoomFixture::QueueFixture fixture(6);
-  ListeningRoom room;
-  ShowAt(room, 1440, 900);
-  room.SetQueuePlaylist(fixture.playlist(), QStringLiteral("Evening"));
-  room.SetShuffleActive(true);
-  EXPECT_EQ(1, room.findChildren<QLabel*>().size() > 0 ? 1 : 0);
-  bool note_visible = false;
-  for (const QLabel *label : room.findChildren<QLabel*>()) {
-    if (label->isVisible() && label->text().contains(QStringLiteral("Shuffle"), Qt::CaseInsensitive)) note_visible = true;
-  }
-  EXPECT_TRUE(note_visible);
-  room.SetShuffleActive(false);
-  note_visible = false;
-  for (const QLabel *label : room.findChildren<QLabel*>()) {
-    if (label->isVisible() && label->text().contains(QStringLiteral("Shuffle"), Qt::CaseInsensitive)) note_visible = true;
-  }
-  EXPECT_FALSE(note_visible);
 
 }
 

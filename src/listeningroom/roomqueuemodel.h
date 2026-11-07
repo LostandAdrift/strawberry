@@ -42,9 +42,9 @@ class RoomQueueModel : public QAbstractListModel {
     AlbumRole,
     LengthSecondsRole,
     IsCurrentRole,
-    // Negative for tracks before the current one, 0 for the current one, 1 for the next track, 2 for the one after, ...
-    // Without a current track every row counts as played-never: the value is the row + 1.
-    UpNextRole,
+    // The stable position of the track in the playlist (1 for the first). It never depends on what plays now: the playlist order is not a
+    // promise about what plays next (explicit queueing, repeat and shuffle can change that).
+    PositionRole,
     UnavailableRole
   };
 

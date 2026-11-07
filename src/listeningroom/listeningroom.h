@@ -160,7 +160,6 @@ class ListeningRoom : public QWidget {
 
   // Queue (a view of a real playlist)
   void SetQueuePlaylist(Playlist *playlist, const QString &name);
-  void SetShuffleActive(const bool active);
   // Called while the queue shows a different playlist than the one playing. `playing_name` names the playlist playback comes from;
   // an empty name means the queue is the playing one.
   void SetQueueBrowsing(const QString &playing_name);
@@ -224,7 +223,6 @@ class ListeningRoom : public QWidget {
   bool compact_;
   RoomTrack track_;
   TransportBar::State state_;
-  bool shuffle_active_;
   QList<RoomServiceCard> services_;
 
   // Rail

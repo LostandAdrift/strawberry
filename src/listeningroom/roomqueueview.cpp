@@ -68,8 +68,6 @@ void RoomQueueDelegate::paint(QPainter *painter, const QStyleOptionViewItem &opt
 
   const QPalette &pal = option.palette;
   const bool current = index.data(RoomQueueModel::IsCurrentRole).toBool();
-  const int up_next = index.data(RoomQueueModel::UpNextRole).toInt();
-  const bool played = !current && up_next < 0;
   const bool hovered = option.state & QStyle::State_MouseOver;
   const bool focused = (option.state & QStyle::State_HasFocus) && (option.state & QStyle::State_Selected);
   const bool unavailable = index.data(RoomQueueModel::UnavailableRole).toBool();
@@ -102,13 +100,14 @@ void RoomQueueDelegate::paint(QPainter *painter, const QStyleOptionViewItem &opt
   QColor title_color = RoomStyle::Text(pal);
   QColor artist_color = RoomStyle::Muted(pal);
   QColor number_color = RoomStyle::Faint(pal);
-  if (played || unavailable) {
+  if (unavailable) {
     title_color = RoomStyle::Muted(pal);
     artist_color = RoomStyle::Faint(pal);
     number_color = RoomStyle::Faint(pal);
   }
 
-  // Gutter: an equalizer glyph for the current track, the number otherwise. The very next track gets the accent so the order is clear.
+  // Gutter: an equalizer glyph for the current track, otherwise its position in the playlist. No row is marked as "next" or "played":
+  // the playlist order does not say what plays next.
   if (current) {
     painter->setPen(Qt::NoPen);
     painter->setBrush(RoomStyle::Accent(pal));
@@ -120,10 +119,9 @@ void RoomQueueDelegate::paint(QPainter *painter, const QStyleOptionViewItem &opt
     }
   }
   else {
-    const int number = up_next >= 0 ? up_next : index.row() + 1;
     painter->setFont(option.font);
-    painter->setPen(up_next == 1 ? RoomStyle::Accent(pal) : number_color);
-    painter->drawText(gutter_rect, Qt::AlignCenter, QString::number(number));
+    painter->setPen(number_color);
+    painter->drawText(gutter_rect, Qt::AlignCenter, QString::number(index.data(RoomQueueModel::PositionRole).toInt()));
   }
 
   const int right_padding = 10;
@@ -169,7 +167,7 @@ RoomQueueView::RoomQueueView(QWidget *parent) : QListView(parent) {
   setFrameShape(QFrame::NoFrame);
   setMouseTracking(true);
   setFocusPolicy(Qt::StrongFocus);
-  setAccessibleName(tr("Queue"));
+  setAccessibleName(tr("Playlist tracks"));
   // The list paints its own background so it blends with the page.
   viewport()->setAutoFillBackground(false);
   setAutoFillBackground(false);
@@ -254,7 +252,7 @@ void RoomQueueView::paintEvent(QPaintEvent *e) {
 
   if (model() && model()->rowCount() > 0) return;
 
-  // An empty queue explains itself instead of showing a blank area.
+  // An empty playlist explains itself instead of showing a blank area.
   QPainter p(viewport());
   p.setRenderHint(QPainter::Antialiasing);
   const QPalette &pal = palette();
