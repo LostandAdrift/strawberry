@@ -59,6 +59,8 @@ class PlaylistImportDialog : public QDialog {
   ~PlaylistImportDialog() override;
 
   void AddService(const ServiceEntry &entry);
+  // Shows the given service (by its entry name) if it is available.
+  void SelectService(const QString &name);
   // Used to label the button "Import" or "Refresh snapshot".
   void SetSnapshotExistsFunction(std::function<bool(const QString &identity)> function) { snapshot_exists_ = function; }
 

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Adrift icon: a drifting copper wave on ink, the same wave as the wordmark in the Listening Room. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="ink" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1b20"/>
+      <stop offset="1" stop-color="#0f0f12"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#ink)"/>
+  <rect x="4.5" y="4.5" width="119" height="119" rx="25.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+  <path d="M24 70 C 38 46, 52 46, 64 64 S 90 82, 104 58" fill="none" stroke="#d9a86a" stroke-width="9" stroke-linecap="round"/>
+  <path d="M24 92 C 38 72, 52 72, 64 88 S 90 102, 104 84" fill="none" stroke="#d9a86a" stroke-opacity="0.38" stroke-width="6" stroke-linecap="round"/>
+</svg>

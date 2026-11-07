@@ -9,6 +9,9 @@ It’s written in **C++ using the Qt framework**, designed for **audiophiles and
 > **Adrift fork:** this branch carries the Adrift listening-room changes:
 > an Adrift Dark theme (the default on fresh installs) and an Omarchy colors option, an honest audio signal path badge with a details dialog (it never claims bit-perfect),
 > read-only Tidal and Qobuz playlist import with refreshable local snapshots, and a guided Direct ALSA setup that never touches your volume.
+> Adrift opens on a new **Listening Room** (large cover, queue, transport, navigation); the classic window is the Library view.
+> ![The Adrift Listening Room, rendered from synthetic sample data](data/screenshot/adrift-listening-room.png)
+> *Rendered from synthetic sample data: invented artists, a cover drawn by code.*
 > See [ADRIFT.md](ADRIFT.md) for exactly what each feature does and its limits. Adrift is a fork of Strawberry and keeps its GPLv3 license and credits.
 
 ![Screenshot of Strawberry Music Player](https://raw.githubusercontent.com/strawberrymusicplayer/strawberry/master/data/screenshot/screenshot.png)

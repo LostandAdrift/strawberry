@@ -80,6 +80,7 @@ class LyricsEditor;
 class Equalizer;
 class ErrorDialog;
 class SignalPathDialog;
+class ListeningRoom;
 class PlaylistImportDialog;
 class FileView;
 class GlobalShortcutsManager;
@@ -206,7 +207,18 @@ class MainWindow : public QMainWindow, public PlatformInterface {
   void SongChanged(const Song &song);
   void UpdateSignalPath();
   void ShowSignalPathDialog();
-  void ShowPlaylistImportDialog();
+  void ShowPlaylistImportDialog(const QString &service_key = QString());
+  void SetupListeningRoom();
+  void ScheduleRoomRefresh();
+  void RefreshRoomQueue();
+  void RefreshRoomPlaylists();
+  void RefreshRoomStreaming();
+  void RoomQueueRowActivated(const int row);
+  void RoomPlaylistActivated(const int playlist_id);
+  void RoomShowPlayingQueue();
+  void SyncRoomTransportActions();
+  void RoomBrowseService(const QString &key);
+  void RoomServiceSettings(const QString &key);
   void MuteChanged(const bool mute);
 
   void CopyFilesToCollection(const QList<QUrl> &urls);
@@ -368,6 +380,12 @@ class MainWindow : public QMainWindow, public PlatformInterface {
   Lazy<SettingsDialog> settings_dialog_;
   SignalPathDialog *signal_path_dialog_ = nullptr;
   PlaylistImportDialog *playlist_import_dialog_ = nullptr;
+  ListeningRoom *room_ = nullptr;
+  QTimer *room_refresh_timer_ = nullptr;
+  bool room_playback_active_ = false;
+  // The playlist the user chose to look at on the Playlists page while another one plays, or -1. Never changes what is playing.
+  int room_browsed_playlist_id_ = -1;
+  int room_shown_playlist_id_ = -1;
   Lazy<AlbumCoverManager> cover_manager_;
   SharedPtr<Equalizer> equalizer_;
   Lazy<OrganizeDialog> organize_dialog_;

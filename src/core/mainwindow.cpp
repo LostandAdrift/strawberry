@@ -113,6 +113,9 @@
 #include "engine/enginebase.h"
 #include "dialogs/errordialog.h"
 #include "dialogs/signalpathdialog.h"
+#include "listeningroom/listeningroom.h"
+#include "listeningroom/roomqueuemodel.h"
+#include "listeningroom/transportbar.h"
 #include "streaming/playlistimportdialog.h"
 #include "widgets/signalpathwidget.h"
 #include "dialogs/aboutdialog.h"
@@ -458,6 +461,12 @@ MainWindow::MainWindow(Application *app,
   // Initialize the UI
   ui_->setupUi(this);
 
+  // The Listening Room is the main surface. The complete classic window becomes its Library page.
+  room_ = new ListeningRoom(this);
+  ui_->layout_centralWidget->removeWidget(ui_->splitter);
+  room_->library_container()->layout()->addWidget(ui_->splitter);
+  ui_->layout_centralWidget->addWidget(room_);
+
 #ifdef _MSC_VER
   if (!smtc_->Initialize(reinterpret_cast<HWND>(winId()))) {
     smtc_->deleteLater();
@@ -648,7 +657,7 @@ MainWindow::MainWindow(Application *app,
   QObject::connect(ui_->action_auto_complete_tags, &QAction::triggered, this, &MainWindow::AutoCompleteTags);
 #endif
   QObject::connect(ui_->action_settings, &QAction::triggered, this, &MainWindow::OpenSettingsDialog);
-  QObject::connect(ui_->action_import_streaming_playlists, &QAction::triggered, this, &MainWindow::ShowPlaylistImportDialog);
+  QObject::connect(ui_->action_import_streaming_playlists, &QAction::triggered, this, [this]() { ShowPlaylistImportDialog(); });
   QObject::connect(ui_->action_toggle_show_sidebar, &QAction::toggled, this, &MainWindow::ToggleSidebar);
   QObject::connect(ui_->action_about_strawberry, &QAction::triggered, this, &MainWindow::ShowAboutDialog);
   QObject::connect(ui_->action_about_qt, &QAction::triggered, qApp, &QApplication::aboutQt);
@@ -1083,6 +1092,8 @@ MainWindow::MainWindow(Application *app,
 
   queue_view_->SetPlaylistManager(app_->playlist_manager());
 
+  SetupListeningRoom();
+
   // This connection must be done after the playlists have been initialized.
   QObject::connect(this, &MainWindow::StopAfterToggled, osd_, &OSDBase::StopAfterToggle);
 
@@ -1328,6 +1339,7 @@ void MainWindow::ReloadSettings() {
   s.beginGroup(BackendSettings::kSettingsGroup);
   bool volume_control = s.value(BackendSettings::kVolumeControl, BackendSettings::kDefaultVolumeControl).toBool();
   s.endGroup();
+  if (room_) room_->SetVolumeEnabled(volume_control);
   if (volume_control != ui_->volume->isEnabled()) {
     ui_->volume->SetEnabled(volume_control);
     if (volume_control) {
@@ -1606,7 +1618,14 @@ void MainWindow::PlaylistsLoaded() {
 
 void MainWindow::MediaStopped() {
 
-  setWindowTitle(u"Strawberry Music Player"_s);
+  setWindowTitle(u"Adrift"_s);
+
+  room_playback_active_ = false;
+  if (room_) {
+    room_->SetNowPlaying(RoomTrack());
+    room_->SetPlaybackState(TransportBar::State::Stopped);
+    ScheduleRoomRefresh();
+  }
 
   ui_->action_stop->setEnabled(false);
   ui_->action_stop_after_this_track->setEnabled(false);
@@ -1645,6 +1664,12 @@ void MainWindow::MediaStopped() {
 
 void MainWindow::MediaPaused() {
 
+  room_playback_active_ = true;
+  if (room_) {
+    room_->SetPlaybackState(TransportBar::State::Paused);
+    ScheduleRoomRefresh();
+  }
+
   ui_->action_stop->setEnabled(true);
   ui_->action_stop_after_this_track->setEnabled(true);
   ui_->action_play_pause->setIcon(IconLoader::Load(u"media-playback-start"_s));
@@ -1665,6 +1690,12 @@ void MainWindow::MediaPaused() {
 
 void MainWindow::MediaPlaying() {
 
+  room_playback_active_ = true;
+  if (room_) {
+    room_->SetPlaybackState(TransportBar::State::Playing);
+    ScheduleRoomRefresh();
+  }
+
   ui_->action_stop->setEnabled(true);
   ui_->action_stop_after_this_track->setEnabled(true);
   ui_->action_play_pause->setIcon(IconLoader::Load(u"media-playback-pause"_s));
@@ -1680,6 +1711,7 @@ void MainWindow::MediaPlaying() {
   }
   ui_->action_play_pause->setEnabled(enable_play_pause);
   ui_->track_slider->SetCanSeek(can_seek);
+  if (room_) room_->SetCanSeek(can_seek);
   systemtrayicon_->SetPlaying(enable_play_pause);
 
   if (!track_position_timer_->isActive()) {
@@ -1713,12 +1745,14 @@ void MainWindow::UpdateSignalPath() {
   const EngineBase::State state = app_->player()->engine()->state();
   if (state != EngineBase::State::Playing && state != EngineBase::State::Paused) {
     ui_->signal_path_widget->Clear();
+    if (room_) room_->signal_path_widget()->Clear();
     return;
   }
 
   // Source metadata may arrive after the stream starts. Until it does the report says "Source unknown" instead of guessing.
   const SignalPath::Report report = SignalPath::Analyze(SignalPath::SourceFromSong(song_playing_), app_->player()->engine()->signal_path_config());
   ui_->signal_path_widget->SetReport(report);
+  if (room_) room_->signal_path_widget()->SetReport(report);
   if (signal_path_dialog_ && signal_path_dialog_->isVisible()) signal_path_dialog_->SetReport(report);
 
 }
@@ -1740,7 +1774,7 @@ void MainWindow::ShowSignalPathDialog() {
 
 }
 
-void MainWindow::ShowPlaylistImportDialog() {
+void MainWindow::ShowPlaylistImportDialog(const QString &service_key) {
 
   if (!playlist_import_dialog_) {
     PlaylistImportDialog *dialog = new PlaylistImportDialog(this);
@@ -1781,15 +1815,263 @@ void MainWindow::ShowPlaylistImportDialog() {
     playlist_import_dialog_ = dialog;
   }
 
+  if (service_key == "tidal"_L1) playlist_import_dialog_->SelectService(u"Tidal"_s);
+  else if (service_key == "qobuz"_L1) playlist_import_dialog_->SelectService(u"Qobuz"_s);
   playlist_import_dialog_->show();
   playlist_import_dialog_->raise();
   playlist_import_dialog_->activateWindow();
 
 }
 
+namespace {
+
+RoomTrack MakeRoomTrack(const Song &song) {
+
+  RoomTrack track;
+  track.title = song.PrettyTitle();
+  track.artist = song.artist().isEmpty() ? song.effective_albumartist() : song.artist();
+  track.album = song.album();
+
+  QStringList detail;
+  if (song.year() > 0) detail << QString::number(song.year());
+  if (song.track() > 0) detail << QCoreApplication::translate("MainWindow", "Track %1").arg(song.track());
+  if (!song.is_local_collection_song() && song.source() != Song::Source::LocalFile && song.source() != Song::Source::Unknown && song.source() != Song::Source::Stream) detail << song.TextForSource();
+  track.detail = detail.join(u" · "_s);
+  return track;
+
+}
+
+}  // namespace
+
+void MainWindow::SetupListeningRoom() {
+
+  // The room is the default main surface. The classic window lives in its Library page, so nothing of it is lost.
+  const SharedPtr<Player> player = app_->player();
+  const SharedPtr<PlaylistManager> manager = app_->playlist_manager();
+
+  // Transport: the room reuses the existing actions, so enabling, shortcuts, tray and MPRIS stay exactly as they are.
+  // The buttons are enabled exactly when the action behind them is, so a click is never silently ignored.
+  for (QAction *action : { ui_->action_previous_track, ui_->action_play_pause, ui_->action_next_track, ui_->action_stop }) {
+    QObject::connect(action, &QAction::changed, this, &MainWindow::SyncRoomTransportActions);
+  }
+  QObject::connect(room_->transport(), &TransportBar::PreviousRequested, ui_->action_previous_track, &QAction::trigger);
+  QObject::connect(room_->transport(), &TransportBar::PlayPauseRequested, ui_->action_play_pause, &QAction::trigger);
+  QObject::connect(room_->transport(), &TransportBar::NextRequested, ui_->action_next_track, &QAction::trigger);
+  QObject::connect(room_->transport(), &TransportBar::StopRequested, ui_->action_stop, &QAction::trigger);
+  QObject::connect(room_->transport(), &TransportBar::MuteToggleRequested, ui_->action_mute, &QAction::trigger);
+  QObject::connect(room_->transport(), &TransportBar::SeekRequested, this, [this](const int position_ms) { app_->player()->SeekTo(static_cast<quint64>(std::max(0, position_ms) / 1000)); });
+  QObject::connect(room_->transport(), &TransportBar::VolumeRequested, &*player, &Player::SetVolumeFromSlider);
+  QObject::connect(&*player, &Player::VolumeChanged, this, [this](const uint volume) { room_->SetVolume(static_cast<int>(volume)); });
+
+  // Navigation and requests.
+  QObject::connect(room_, &ListeningRoom::ViewChanged, this, [this](const ListeningRoom::View view) {
+    Settings s;
+    s.beginGroup(MainWindowSettings::kSettingsGroup);
+    s.setValue(MainWindowSettings::kMainView, ListeningRoom::ViewToString(view));
+    s.endGroup();
+    if (view == ListeningRoom::View::Streaming) RefreshRoomStreaming();
+    if (view == ListeningRoom::View::Playlists) RefreshRoomPlaylists();
+  });
+  QObject::connect(room_, &ListeningRoom::QueueRowActivated, this, &MainWindow::RoomQueueRowActivated);
+  QObject::connect(room_, &ListeningRoom::PlaylistActivated, this, &MainWindow::RoomPlaylistActivated);
+  QObject::connect(room_, &ListeningRoom::ImportPlaylistsRequested, this, [this](const QString &service_key) { ShowPlaylistImportDialog(service_key); });
+  QObject::connect(room_, &ListeningRoom::BrowseServiceRequested, this, &MainWindow::RoomBrowseService);
+  QObject::connect(room_, &ListeningRoom::ServiceSettingsRequested, this, &MainWindow::RoomServiceSettings);
+  QObject::connect(room_, &ListeningRoom::SettingsRequested, this, &MainWindow::OpenSettingsDialog);
+  QObject::connect(room_, &ListeningRoom::SignalPathDetailsRequested, this, &MainWindow::ShowSignalPathDialog);
+
+  // The queue and the playlist cards are views of the real playlists. Any change of the playlists schedules one refresh.
+  room_refresh_timer_ = new QTimer(this);
+  room_refresh_timer_->setSingleShot(true);
+  room_refresh_timer_->setInterval(0);
+  QObject::connect(room_refresh_timer_, &QTimer::timeout, this, [this]() {
+    RefreshRoomQueue();
+    RefreshRoomPlaylists();
+  });
+  QObject::connect(&*manager, &PlaylistManager::CurrentChanged, this, &MainWindow::ScheduleRoomRefresh);
+  QObject::connect(&*manager, &PlaylistManager::ActiveChanged, this, &MainWindow::ScheduleRoomRefresh);
+  QObject::connect(&*manager, &PlaylistManager::PlaylistAdded, this, &MainWindow::ScheduleRoomRefresh);
+  QObject::connect(&*manager, &PlaylistManager::PlaylistClosed, this, &MainWindow::ScheduleRoomRefresh);
+  QObject::connect(&*manager, &PlaylistManager::PlaylistRenamed, this, &MainWindow::ScheduleRoomRefresh);
+  QObject::connect(&*manager, &PlaylistManager::PlaylistChanged, this, &MainWindow::ScheduleRoomRefresh);
+  QObject::connect(&*manager, &PlaylistManager::AllPlaylistsLoaded, this, &MainWindow::ScheduleRoomRefresh);
+  QObject::connect(manager->sequence(), &PlaylistSequence::ShuffleModeChanged, this, [this](const PlaylistSequence::ShuffleMode mode) { room_->SetShuffleActive(mode != PlaylistSequence::ShuffleMode::Off); });
+  room_->SetShuffleActive(manager->sequence()->shuffle_mode() != PlaylistSequence::ShuffleMode::Off);
+
+  // Start state: the user's volume is shown, never set.
+  room_->SetVolume(static_cast<int>(player->GetVolume()));
+  room_->SetVolumeEnabled(ui_->volume->isEnabled());
+  room_->SetMuted(player->is_muted());
+  room_->SetPlaybackState(TransportBar::State::Stopped);
+  SyncRoomTransportActions();
+  QObject::connect(room_, &ListeningRoom::ShowPlayingQueueRequested, this, &MainWindow::RoomShowPlayingQueue);
+
+  RefreshRoomQueue();
+  RefreshRoomPlaylists();
+  RefreshRoomStreaming();
+
+  // The room is the default view, even for existing settings. Only a view the user chose in an earlier session is restored.
+  Settings s;
+  s.beginGroup(MainWindowSettings::kSettingsGroup);
+  const QString saved_view = s.value(MainWindowSettings::kMainView).toString();
+  s.endGroup();
+  room_->SetView(ListeningRoom::ViewFromString(saved_view, ListeningRoom::View::Listening));
+
+}
+
+void MainWindow::ScheduleRoomRefresh() {
+
+  if (room_refresh_timer_ && !room_refresh_timer_->isActive()) room_refresh_timer_->start();
+
+}
+
+void MainWindow::SyncRoomTransportActions() {
+
+  if (!room_) return;
+  room_->SetTransportActionStates(ui_->action_previous_track->isEnabled(), ui_->action_play_pause->isEnabled(), ui_->action_next_track->isEnabled(), ui_->action_stop->isEnabled());
+
+}
+
+void MainWindow::RefreshRoomQueue() {
+
+  if (!room_) return;
+  const SharedPtr<PlaylistManager> manager = app_->playlist_manager();
+
+  const ListeningRoom::QueueChoice choice = ListeningRoom::ChooseQueue(manager->playlist_ids(), room_playback_active_, manager->active_id(), manager->current_id(), room_browsed_playlist_id_);
+  room_browsed_playlist_id_ = choice.browsed;
+  room_shown_playlist_id_ = choice.shown;
+
+  room_->SetQueuePlaylist(choice.shown >= 0 ? manager->playlist(choice.shown) : nullptr, choice.shown >= 0 ? manager->playlist_name(choice.shown) : QString());
+  room_->SetQueueBrowsing(choice.browsing() ? manager->playlist_name(choice.playing) : QString());
+
+}
+
+void MainWindow::RoomShowPlayingQueue() {
+
+  room_browsed_playlist_id_ = -1;
+  RefreshRoomQueue();
+  RefreshRoomPlaylists();
+
+}
+
+void MainWindow::RefreshRoomPlaylists() {
+
+  if (!room_) return;
+  const SharedPtr<PlaylistManager> manager = app_->playlist_manager();
+
+  QList<RoomPlaylistCard> cards;
+  const QList<int> ids = manager->playlist_ids();
+  for (const int id : ids) {
+    Playlist *playlist = manager->playlist(id);
+    if (!playlist) continue;
+    RoomPlaylistCard card;
+    card.id = id;
+    card.name = manager->playlist_name(id);
+    card.track_count = playlist->rowCount(QModelIndex());
+    card.is_current = id == room_shown_playlist_id_;
+    card.is_playing = room_playback_active_ && id == manager->active_id();
+    const QString special = playlist->special_type();
+    if (special.startsWith("tidal:"_L1)) card.kind = tr("Tidal snapshot");
+    else if (special.startsWith("qobuz:"_L1)) card.kind = tr("Qobuz snapshot");
+    cards << card;
+  }
+  room_->SetPlaylists(cards);
+
+}
+
+void MainWindow::RefreshRoomStreaming() {
+
+  if (!room_) return;
+
+  QList<RoomServiceCard> services;
+
+#ifdef HAVE_TIDAL
+  if (TidalServicePtr tidal = app_->streaming_services()->Service<TidalService>()) {
+    Settings s;
+    s.beginGroup(TidalSettings::kSettingsGroup);
+    const bool enabled = s.value(TidalSettings::kEnabled, TidalSettings::kDefaultEnabled).toBool();
+    s.endGroup();
+    RoomServiceCard card;
+    card.key = u"tidal"_s;
+    card.name = u"Tidal"_s;
+    card.signed_in = enabled && tidal->authenticated();
+    card.status = !enabled ? tr("Not enabled") : (card.signed_in ? tr("Signed in") : tr("Not signed in"));
+    services << card;
+  }
+#endif
+#ifdef HAVE_QOBUZ
+  if (QobuzServicePtr qobuz = app_->streaming_services()->Service<QobuzService>()) {
+    Settings s;
+    s.beginGroup(QobuzSettings::kSettingsGroup);
+    const bool enabled = s.value(QobuzSettings::kEnabled, QobuzSettings::kDefaultEnabled).toBool();
+    s.endGroup();
+    RoomServiceCard card;
+    card.key = u"qobuz"_s;
+    card.name = u"Qobuz"_s;
+    card.signed_in = enabled && qobuz->authenticated();
+    card.status = !enabled ? tr("Not enabled") : (card.signed_in ? tr("Signed in") : tr("Not signed in"));
+    services << card;
+  }
+#endif
+
+  room_->SetStreamingServices(services);
+
+}
+
+void MainWindow::RoomQueueRowActivated(const int row) {
+
+  // Same as double-clicking a row of the playlist in the Library: the queue's playlist becomes active and the row plays.
+  Playlist *playlist = room_->queue_model()->playlist();
+  if (!playlist || row < 0 || row >= playlist->rowCount(QModelIndex())) return;
+
+  // Playing a row makes its playlist the one that plays, so the browsed selection ends.
+  room_browsed_playlist_id_ = -1;
+  app_->playlist_manager()->SetCurrentPlaylist(playlist->id());
+  app_->playlist_manager()->SetActiveToCurrent();
+  app_->player()->PlayAt(row, false, 0, EngineBase::TrackChangeType::Manual, Playlist::AutoScroll::Maybe, true);
+
+}
+
+void MainWindow::RoomPlaylistActivated(const int playlist_id) {
+
+  if (!app_->playlist_manager()->playlist_ids().contains(playlist_id)) return;
+
+  // Choosing a playlist only changes what the queue shows (and the Library's current playlist). It never starts, stops or changes playback.
+  room_browsed_playlist_id_ = playlist_id;
+  app_->playlist_manager()->SetCurrentPlaylist(playlist_id);
+  RefreshRoomQueue();
+  RefreshRoomPlaylists();
+
+}
+
+void MainWindow::RoomBrowseService(const QString &key) {
+
+  // Opens the service's own tab in the Library, where the full browsing and searching lives.
+  QWidget *view = nullptr;
+#ifdef HAVE_TIDAL
+  if (key == "tidal"_L1) view = tidal_view_;
+#endif
+#ifdef HAVE_QOBUZ
+  if (key == "qobuz"_L1) view = qobuz_view_;
+#endif
+  if (!view) return;
+  room_->SetView(ListeningRoom::View::Library);
+  const int index = ui_->tabs->IndexOfTab(view);
+  if (index >= 0) ui_->tabs->SetCurrentIndex(index);
+
+}
+
+void MainWindow::RoomServiceSettings(const QString &key) {
+
+  if (key == "tidal"_L1) OpenServiceSettingsDialog(Song::Source::Tidal);
+  else if (key == "qobuz"_L1) OpenServiceSettingsDialog(Song::Source::Qobuz);
+
+}
+
 void MainWindow::MuteChanged(const bool mute) {
 
   UpdateSignalPath();
+  if (room_) room_->SetMuted(mute);
   ui_->action_mute->setChecked(mute);
   systemtrayicon_->MuteButtonStateChanged(mute);
   ui_->volume->SetMuted(mute);
@@ -1802,6 +2084,11 @@ void MainWindow::SongChanged(const Song &song) {
 
   song_playing_ = song;
   song_ = song;
+  if (room_) {
+    room_->SetNowPlaying(MakeRoomTrack(song));
+    // The cover of the previous track must not stay while the new one loads.
+    room_->SetCover(QImage());
+  }
   UpdateSignalPath();
   setWindowTitle(song.PrettyTitleWithArtist());
   systemtrayicon_->SetProgress(0);
@@ -2109,6 +2396,7 @@ void MainWindow::UpdateTrackSliderPosition() {
 
   // Update the slider
   ui_->track_slider->SetValue(slider_position, slider_length);
+  if (room_) room_->SetPosition(slider_position, slider_length);
 
 }
 
@@ -3728,6 +4016,7 @@ void MainWindow::AlbumCoverLoaded(const Song &song, const AlbumCoverLoaderResult
   album_cover_ = result.album_cover;
 
   Q_EMIT AlbumCoverReady(song, result.album_cover.image);
+  if (room_) room_->SetCover(result.album_cover.image);
 
   const bool enable_change_art = song.is_local_collection_song() && !song.effective_albumartist().isEmpty() && !song.album().isEmpty();
   album_cover_choice_controller_->show_cover_action()->setEnabled(result.success && result.type != AlbumCoverLoaderResult::Type::Unset);

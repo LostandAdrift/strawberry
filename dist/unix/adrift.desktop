@@ -1,0 +1,15 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Adrift
+GenericName=Music Player
+Comment=A quiet listening room for your music
+Exec=strawberry %U
+TryExec=strawberry
+Icon=adrift
+Terminal=false
+Categories=AudioVideo;Player;Qt;Audio;
+Keywords=Audio;Player;Music;Strawberry;Adrift;
+MimeType=x-content/audio-player;application/ogg;application/x-ogg;application/x-ogm-audio;audio/flac;audio/ogg;audio/vorbis;audio/aac;audio/mp4;audio/mpeg;audio/mpegurl;audio/x-flac;audio/x-vorbis;audio/x-wav;audio/x-wavpack;audio/x-ape;audio/x-mp3;audio/x-mpeg;audio/x-mpegurl;audio/x-ms-wma;audio/x-musepack;audio/x-scpls;x-scheme-handler/tidal;
+# The window class stays the one of Strawberry on purpose: the application name, settings and database are unchanged.
+StartupWMClass=strawberry

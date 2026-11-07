@@ -155,6 +155,14 @@ void PlaylistImportDialog::AddService(const ServiceEntry &entry) {
 
 }
 
+void PlaylistImportDialog::SelectService(const QString &name) {
+
+  if (loading_) return;
+  const int index = combo_service_->findText(name, Qt::MatchFixedString);
+  if (index >= 0 && index != combo_service_->currentIndex()) combo_service_->setCurrentIndex(index);
+
+}
+
 PlaylistImportDialog::Service *PlaylistImportDialog::current_service() {
 
   const int index = combo_service_->currentIndex();

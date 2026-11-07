@@ -9,6 +9,25 @@ Internal names (settings, binary, D-Bus, file formats) are unchanged so the fork
 
 ## What is different
 
+### The Listening Room (the main window)
+
+Adrift opens on the **Listening Room**, even if you already used Strawberry on the same settings. The classic window is not gone: it is the **Library** destination.
+
+![The Listening Room, rendered from synthetic sample data (invented artists, cover drawn by code).](data/screenshot/adrift-listening-room.png)
+
+*The image is a render of the real window widgets with synthetic data, not a photograph of a music collection.*
+
+- **Side rail:** Listening, Library, Playlists, Streaming, and Settings. In narrow windows the rail shows icons only. `Alt+1` to `Alt+4` switch destinations. The rail is visible in every view, so the way back is always there.
+- **Listening:** the current cover large, with a deliberate placeholder when there is no artwork or nothing is playing; title, artist, album; the signal path badge (click it for the details); and the **queue**, a view of the real playlist: the current track highlighted, played tracks dimmed, the next track numbered, compact rows, double click or Enter to play. It scrolls to whole rows with the current track near the top; if you scroll away it stays where you put it. With shuffle on, the queue says so, because the next track may then differ from the list order.
+- **Playlists:** your open playlists as cards (what is playing, what is shown in the queue, Tidal/Qobuz snapshots). Choosing one shows *that* playlist in the queue. If another playlist is playing, the queue says so, **playback is not touched**, and "Show what is playing" takes you back. Playing a row of the chosen playlist makes it the playing one.
+- **Streaming:** Tidal and Qobuz (where built in) with their real state (not enabled, not signed in, signed in), and entry points to browse in the Library, to import playlists, and to the account settings. Importing is a manual, read-only copy; there is no background sync.
+- **Library:** the complete classic Strawberry window (collection, tabs, playlist editing, tag editing, its own controls). It is hosted, not rebuilt, so nothing of it is removed.
+- **Transport:** previous, play/pause, next, stop, seek with elapsed and length, and volume, always at the bottom of Listening, Playlists and Streaming. The buttons use the application's own actions, so they are enabled exactly when those are, and tray, shortcuts and MPRIS behave as before. The volume slider shows your setting and only ever changes it when you do; Adrift never sets the volume, the output device or exclusive mode for you.
+- **Look:** it uses the current palette (Adrift Dark, the Omarchy colors, or the system colors) and follows runtime changes, scales with the font size, and every control has an accessible name and keyboard focus.
+- **Choosing the classic view:** pick Library once and Adrift remembers it for the next start. Until you choose, the Listening Room opens.
+
+The Adrift icon (`dist/unix/adrift.svg`) and a launcher entry (`dist/unix/adrift.desktop`) are provided; `-DINSTALL_ADRIFT_LAUNCHER=ON` installs them. The binary, the internal application name, the settings and the database are unchanged, so Adrift and Strawberry share one profile.
+
 ### Color themes (Settings → Appearance → Colors → Color theme)
 
 - **Adrift Dark** (the default on a fresh install): neutral ink surfaces, warm off-white text and one restrained champagne-copper accent. Text and the accent are above 7:1 contrast against their backgrounds. It only sets palette colors; there is no global stylesheet, so controls keep their normal style.
@@ -37,7 +56,7 @@ When space is short the badge drops its secondary parts first: the `App DSP` chi
 
 The badge is a real button (keyboard focusable, Space/Enter to activate, accessible name and description). Click it to open the **Audio signal path** dialog: the source quality first, the output, then the processing. Only processing that is actually active is listed; everything that is off is one summary line. Technical text is collapsed under "Technical details" and **Copy details** copies it either way. The content scrolls, so the buttons stay reachable in a small window, and **Output settings…** opens the Backend settings.
 
-### Import streaming playlists (Tools → Import streaming playlists…)
+### Import streaming playlists (Playlists or Streaming page, or Tools → Import streaming playlists…)
 
 A read-only importer for **Tidal** and **Qobuz** playlists, using the login you already configured in Settings (no keys or tokens are stored in the program).
 
@@ -79,7 +98,7 @@ cmake --build build --target build_tests
 cmake --build build --target test        # runs every test with CTest
 ```
 
-New tests: `themepalette_test`, `signalpath_test`, `signalpathwidget_test`, `playlistimport_test` (fake network, multi-page, expiry, cancel, refresh), `directalsa_test`, and `adrift_render_test`.
+New tests: `listeningroom_test` (navigation, empty and playing states, the queue over a real playlist, transport signals and enabled state, playlist browsing while another plays, 1000x700 fit, scrolling), `adrift_surface_render_test` (full-surface renders), `themepalette_test`, `signalpath_test`, `signalpathwidget_test`, `playlistimport_test` (fake network, multi-page, expiry, cancel, refresh), `directalsa_test`, and `adrift_render_test`.
 
 `adrift_render_test` renders the real widgets, dialogs and palettes with synthetic data to PNG files without showing any window (it runs on Qt's offscreen platform). To keep the images, configure with `-DADRIFT_SCREENSHOT_DIR=<directory>`.
 

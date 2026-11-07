@@ -106,6 +106,13 @@ set(ADRIFT_SCREENSHOT_DIR "" CACHE PATH "Directory where adrift_render_test save
 add_test_file(src/adrift_render_test.cpp true)
 target_compile_definitions(adrift_render_test PRIVATE ADRIFT_SCREENSHOT_DIR="${ADRIFT_SCREENSHOT_DIR}")
 set_tests_properties(adrift_render_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# The Listening Room: behaviour tests and full-surface renders of the production widget. Offscreen, so no window appears on screen.
+add_test_file(src/listeningroom_test.cpp true)
+set_tests_properties(listeningroom_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_test_file(src/adrift_surface_render_test.cpp true)
+target_compile_definitions(adrift_surface_render_test PRIVATE ADRIFT_SCREENSHOT_DIR="${ADRIFT_SCREENSHOT_DIR}")
+set_tests_properties(adrift_surface_render_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 add_test_file(src/playlistimport_test.cpp true)
 add_test_file(src/utilities_test.cpp false)
 add_test_file(src/networkproxyfactory_test.cpp false)

@@ -838,6 +838,12 @@ set(SOURCES
   src/widgets/prettyslider.cpp
   src/widgets/volumeslider.cpp
   src/widgets/signalpathwidget.cpp
+  src/listeningroom/coverartwidget.cpp
+  src/listeningroom/seekslider.cpp
+  src/listeningroom/transportbar.cpp
+  src/listeningroom/roomqueuemodel.cpp
+  src/listeningroom/roomqueueview.cpp
+  src/listeningroom/listeningroom.cpp
   src/widgets/stickyslider.cpp
   src/widgets/stretchheaderview.cpp
   src/widgets/trackslider.cpp
@@ -1154,6 +1160,14 @@ set(HEADERS
   src/widgets/prettyslider.h
   src/widgets/volumeslider.h
   src/widgets/signalpathwidget.h
+  src/listeningroom/coverartwidget.h
+  src/listeningroom/seekslider.h
+  src/listeningroom/transportbar.h
+  src/listeningroom/roomqueuemodel.h
+  src/listeningroom/roomqueueview.h
+  src/listeningroom/listeningroom.h
+  src/listeningroom/elidedlabel.h
+  src/listeningroom/roomstyle.h
   src/widgets/stickyslider.h
   src/widgets/stretchheaderview.h
   src/widgets/trackslider.h
@@ -1883,6 +1897,14 @@ target_link_libraries(strawberry PUBLIC strawberry_lib)
 
 if(NOT APPLE)
   install(TARGETS strawberry RUNTIME DESTINATION bin)
+endif()
+
+# Adrift launcher assets: a vector icon and a desktop entry named "Adrift". Off by default so that installing alongside a packaged Strawberry is never affected.
+# The binary, application name, settings and database stay those of Strawberry.
+option(INSTALL_ADRIFT_LAUNCHER "Install the Adrift icon and desktop entry" OFF)
+if(INSTALL_ADRIFT_LAUNCHER AND UNIX AND NOT APPLE)
+  install(FILES dist/unix/adrift.svg DESTINATION share/icons/hicolor/scalable/apps)
+  install(FILES dist/unix/adrift.desktop DESTINATION share/applications)
 endif()
 
 if(HAVE_TRANSLATIONS AND INSTALL_TRANSLATIONS AND INSTALL_TRANSLATIONS_FILES)
