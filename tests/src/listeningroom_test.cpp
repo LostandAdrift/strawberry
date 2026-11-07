@@ -31,7 +31,9 @@
 
 #include "listeningroom/coverartwidget.h"
 #include "listeningroom/elidedlabel.h"
+#include "listeningroom/libraryview.h"
 #include "listeningroom/listeningroom.h"
+#include "listeningroom/roomwidgets.h"
 #include "listeningroom/roomqueuemodel.h"
 #include "listeningroom/roomqueueview.h"
 #include "listeningroom/seekslider.h"
@@ -123,28 +125,41 @@ TEST(ListeningRoomTest, ViewNamesRoundTripAndUnknownFallsBack) {
 
 }
 
-TEST(ListeningRoomTest, LibraryHostsTheClassicSurfaceAndHandsOverTheTransport) {
+TEST(ListeningRoomTest, LibraryIsNativeAndTheClassicWindowIsOnlyAnExplicitAdvancedPage) {
 
   ListeningRoom room;
   QLabel *classic = new QLabel(QStringLiteral("classic window"));
-  room.library_container()->layout()->addWidget(classic);
+  room.classic_container()->layout()->addWidget(classic);
   ShowAt(room, 1440, 900);
 
-  // The room's transport is there on every page except the Library, which brings its own controls.
+  // The default surfaces never show the classic window, and the room's transport is there on every one of them.
   EXPECT_FALSE(classic->isVisible());
   EXPECT_TRUE(room.transport()->isVisible());
 
   room.nav_button(ListeningRoom::View::Library)->click();
-  EXPECT_TRUE(classic->isVisible());
-  EXPECT_FALSE(room.transport()->isVisible());
+  EXPECT_TRUE(room.library()->isVisible());
+  EXPECT_FALSE(classic->isVisible());
+  // One transport for the whole app, also in the Library: there is no second bar.
+  EXPECT_TRUE(room.transport()->isVisible());
   // The navigation stays reachable from the Library, so the way back is always visible.
   EXPECT_TRUE(room.nav_button(ListeningRoom::View::Listening)->isVisible());
 
-  for (const ListeningRoom::View view : { ListeningRoom::View::Playlists, ListeningRoom::View::Streaming, ListeningRoom::View::Listening }) {
+  // The advanced action is the only way in. The rail keeps "Library" lit, and the classic window brings its own controls.
+  room.library()->advanced_button()->click();
+  EXPECT_EQ(ListeningRoom::View::Classic, room.view());
+  EXPECT_TRUE(classic->isVisible());
+  EXPECT_FALSE(room.library()->isVisible());
+  EXPECT_FALSE(room.transport()->isVisible());
+  EXPECT_TRUE(room.nav_button(ListeningRoom::View::Library)->isChecked());
+
+  for (const ListeningRoom::View view : { ListeningRoom::View::Playlists, ListeningRoom::View::Streaming, ListeningRoom::View::Listening, ListeningRoom::View::Library }) {
     room.nav_button(view)->click();
     EXPECT_FALSE(classic->isVisible());
     EXPECT_TRUE(room.transport()->isVisible());
   }
+
+  // No other page offers the classic window.
+  EXPECT_EQ(ListeningRoom::View::Listening, ListeningRoom::ViewFromString(QStringLiteral("classic"), ListeningRoom::View::Listening));
 
 }
 
@@ -1019,26 +1034,26 @@ TEST(ListeningRoomTest, PageHeadingsLineUpAcrossPages) {
 
 }
 
-TEST(ListeningRoomTest, ClassicWindowMinimumOnlyAppliesInTheLibrary) {
+TEST(ListeningRoomTest, ClassicWindowMinimumOnlyAppliesOnTheAdvancedPage) {
 
   ListeningRoom room;
   // The classic window has a large minimum size (the stock window opens at 1131x685 and does not shrink below roughly that).
   QWidget *classic = new QWidget;
   classic->setMinimumSize(1131, 685);
-  room.library_container()->layout()->addWidget(classic);
+  room.classic_container()->layout()->addWidget(classic);
 
-  // In the Listening Room and the other views the compact size is honoured.
+  // In the Listening Room, the native Library and the other views the compact size is honoured.
   ShowAt(room, 1000, 700);
   EXPECT_EQ(QSize(1000, 700), room.size());
-  for (const ListeningRoom::View view : { ListeningRoom::View::Playlists, ListeningRoom::View::Streaming, ListeningRoom::View::Listening }) {
+  for (const ListeningRoom::View view : { ListeningRoom::View::Playlists, ListeningRoom::View::Streaming, ListeningRoom::View::Library, ListeningRoom::View::Listening }) {
     room.nav_button(view)->click();
     QCoreApplication::processEvents();
     room.layout()->activate();
     EXPECT_EQ(QSize(1000, 700), room.size());
   }
 
-  // Only the Library, which hosts the classic window, asks for the classic window's size.
-  room.nav_button(ListeningRoom::View::Library)->click();
+  // Only the advanced page asks for the classic window's size.
+  room.SetView(ListeningRoom::View::Classic);
   QCoreApplication::processEvents();
   room.layout()->activate();
   EXPECT_GE(room.minimumSizeHint().width(), 720);

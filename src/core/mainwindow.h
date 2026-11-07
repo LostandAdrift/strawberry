@@ -219,6 +219,9 @@ class MainWindow : public QMainWindow, public PlatformInterface {
   void SyncRoomTransportActions();
   void RoomBrowseService(const QString &key);
   void RoomServiceSettings(const QString &key);
+  void RoomLibraryPlay(const SongList &songs, const int start_index);
+  void RoomLibraryAdd(const SongList &songs, const int mode);
+  void RoomCatalogClosed();
   void MuteChanged(const bool mute);
 
   void CopyFilesToCollection(const QList<QUrl> &urls);
@@ -385,6 +388,7 @@ class MainWindow : public QMainWindow, public PlatformInterface {
   bool room_playback_active_ = false;
   // The playlist the user chose to look at on the Playlists page while another one plays, or -1. Never changes what is playing.
   int room_browsed_playlist_id_ = -1;
+  QWidget *room_catalog_view_ = nullptr;
   int room_shown_playlist_id_ = -1;
   Lazy<AlbumCoverManager> cover_manager_;
   SharedPtr<Equalizer> equalizer_;

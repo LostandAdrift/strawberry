@@ -22,7 +22,9 @@
 #include <algorithm>
 
 #include <QAbstractButton>
+#include <QEnterEvent>
 #include <QHBoxLayout>
+#include <QMouseEvent>
 #include <QLabel>
 #include <QPainter>
 #include <QPainterPath>
@@ -38,12 +40,15 @@
 #include "transportbar.h"
 #include "elidedlabel.h"
 #include "roomstyle.h"
+#include "roommotion.h"
 #include "seekslider.h"
 
 // ------------------------------------------------------------------------------------------------------------ TransportButton
 
-TransportButton::TransportButton(const Kind kind, QWidget *parent) : QAbstractButton(parent), kind_(kind), primary_(kind == Kind::Play || kind == Kind::Pause) {
+TransportButton::TransportButton(const Kind kind, QWidget *parent) : QAbstractButton(parent), kind_(kind), primary_(kind == Kind::Play || kind == Kind::Pause), hover_(new RoomTween(this, 0.0, 150)), press_(new RoomTween(this, 0.0, 90)) {
 
+  QObject::connect(hover_, &RoomTween::Changed, this, [this]() { update(); });
+  QObject::connect(press_, &RoomTween::Changed, this, [this]() { update(); });
   setFocusPolicy(Qt::StrongFocus);
   setCursor(Qt::PointingHandCursor);
   setAccessibleName(NameFor(kind));
@@ -83,6 +88,27 @@ QSize TransportButton::sizeHint() const {
 
 }
 
+void TransportButton::enterEvent(QEnterEvent *e) {
+  QAbstractButton::enterEvent(e);
+  if (isEnabled()) hover_->SetTarget(1.0);
+}
+
+void TransportButton::leaveEvent(QEvent *e) {
+  QAbstractButton::leaveEvent(e);
+  hover_->SetTarget(0.0);
+  press_->SetTarget(0.0);
+}
+
+void TransportButton::mousePressEvent(QMouseEvent *e) {
+  QAbstractButton::mousePressEvent(e);
+  if (isDown()) press_->SetTarget(1.0);
+}
+
+void TransportButton::mouseReleaseEvent(QMouseEvent *e) {
+  QAbstractButton::mouseReleaseEvent(e);
+  press_->SetTarget(0.0);
+}
+
 void TransportButton::paintEvent(QPaintEvent *e) {
 
   Q_UNUSED(e)
@@ -91,7 +117,11 @@ void TransportButton::paintEvent(QPaintEvent *e) {
 
   const QPalette &pal = palette();
   const bool enabled = isEnabled();
-  const QRectF bounds = QRectF(rect()).adjusted(2, 2, -2, -2);
+  // The button grows a little toward the pointer and sinks when pressed.
+  const qreal hover = enabled ? hover_->value() : 0.0;
+  const qreal press = enabled ? press_->value() : 0.0;
+  const qreal inset = 2.0 - hover * 0.8 + press * 1.6;
+  const QRectF bounds = QRectF(rect()).adjusted(inset, inset, -inset, -inset);
   const QPointF centre = bounds.center();
   const qreal radius = std::min(bounds.width(), bounds.height()) / 2.0;
 
@@ -100,16 +130,15 @@ void TransportButton::paintEvent(QPaintEvent *e) {
   if (primary_) {
     QColor fill = RoomStyle::Accent(pal);
     if (!enabled) fill = RoomStyle::Mix(RoomStyle::Window(pal), fill, 0.35);
-    else if (isDown()) fill = RoomStyle::Mix(fill, RoomStyle::Window(pal), 0.18);
-    else if (underMouse()) fill = RoomStyle::Mix(fill, RoomStyle::Text(pal), 0.12);
+    else fill = RoomStyle::Mix(RoomStyle::Mix(fill, RoomStyle::Text(pal), 0.12 * hover), RoomStyle::Window(pal), 0.18 * press);
     p.setPen(Qt::NoPen);
     p.setBrush(fill);
     p.drawEllipse(centre, radius, radius);
     ink = RoomStyle::AccentText(pal);
   }
-  else if (underMouse() || isDown()) {
+  else if (hover > 0.01 || press > 0.01) {
     p.setPen(Qt::NoPen);
-    p.setBrush(RoomStyle::Surface(pal, isDown() ? 0.16 : 0.10));
+    p.setBrush(RoomStyle::Surface(pal, 0.10 * hover + 0.06 * press));
     p.drawEllipse(centre, radius, radius);
   }
 

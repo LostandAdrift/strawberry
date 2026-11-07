@@ -31,6 +31,9 @@ class QLabel;
 class QPaintEvent;
 class QResizeEvent;
 class ElidedLabel;
+class QEnterEvent;
+class QMouseEvent;
+class RoomTween;
 class SeekSlider;
 
 // A transport button drawn from simple shapes with the palette colors (so it follows every theme and needs no icon theme).
@@ -61,12 +64,18 @@ class TransportButton : public QAbstractButton {
 
  protected:
   void paintEvent(QPaintEvent *e) override;
+  void enterEvent(QEnterEvent *e) override;
+  void leaveEvent(QEvent *e) override;
+  void mousePressEvent(QMouseEvent *e) override;
+  void mouseReleaseEvent(QMouseEvent *e) override;
 
  private:
   static QString NameFor(const Kind kind);
 
   Kind kind_;
   bool primary_;
+  RoomTween *hover_;
+  RoomTween *press_;
 };
 
 // The persistent bar at the bottom of the Listening Room: what is playing, the transport buttons, seek with elapsed and duration, and volume.

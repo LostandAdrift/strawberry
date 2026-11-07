@@ -26,6 +26,10 @@
 #include <QApplication>
 #include <QBoxLayout>
 #include <QButtonGroup>
+#include <QEnterEvent>
+#include <QMouseEvent>
+#include <QStackedLayout>
+#include <QTimer>
 #include <QHBoxLayout>
 #include <QKeySequence>
 #include <QLabel>
@@ -38,12 +42,16 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QShortcut>
+#include <QSignalBlocker>
 #include <QStackedWidget>
 #include <QStyledItemDelegate>
 #include <QVBoxLayout>
 
 #include "listeningroom.h"
 #include "coverartwidget.h"
+#include "libraryview.h"
+#include "roommotion.h"
+#include "roomwidgets.h"
 #include "elidedlabel.h"
 #include "playlist/playlist.h"
 #include "roomqueuemodel.h"
@@ -73,65 +81,43 @@ QString Tracks(const int n) {
   return CountText(n, "1 track", "%1 tracks");
 }
 
-// A pill-shaped button drawn from the palette. The primary one is filled with the accent, the others have a quiet outline.
-class RoomButton : public QPushButton {
- public:
-  explicit RoomButton(const QString &text, const bool primary = false, QWidget *parent = nullptr) : QPushButton(text, parent), primary_(primary) {
-    setCursor(Qt::PointingHandCursor);
-    setFocusPolicy(Qt::StrongFocus);
-  }
-
-  QSize sizeHint() const override {
-    const QFontMetrics fm(font());
-    return QSize(fm.horizontalAdvance(text()) + fm.height() * 2, std::max(32, fm.height() + 14));
-  }
-  QSize minimumSizeHint() const override { return sizeHint(); }
-
- protected:
-  void paintEvent(QPaintEvent *e) override {
-    Q_UNUSED(e)
-    QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
-    const QPalette &pal = palette();
-    const QRectF r = QRectF(rect()).adjusted(1, 1, -1, -1);
-    const qreal radius = r.height() / 2.0;
-    const bool on = isEnabled();
-
-    QColor ink = on ? RoomStyle::Text(pal) : RoomStyle::Faint(pal);
-    if (primary_) {
-      QColor fill = RoomStyle::Accent(pal);
-      if (!on) fill = RoomStyle::Mix(RoomStyle::Window(pal), fill, 0.3);
-      else if (isDown()) fill = RoomStyle::Mix(fill, RoomStyle::Window(pal), 0.2);
-      else if (underMouse()) fill = RoomStyle::Mix(fill, RoomStyle::Text(pal), 0.12);
-      p.setPen(Qt::NoPen);
-      p.setBrush(fill);
-      p.drawRoundedRect(r, radius, radius);
-      ink = RoomStyle::AccentText(pal);
-    }
-    else {
-      p.setPen(QPen(RoomStyle::Mix(RoomStyle::Window(pal), RoomStyle::Text(pal), underMouse() && on ? 0.4 : 0.24), 1));
-      if (underMouse() && on) p.setBrush(RoomStyle::Surface(pal, 0.07));
-      else p.setBrush(Qt::NoBrush);
-      p.drawRoundedRect(r, radius, radius);
-    }
-    if (hasFocus()) {
-      p.setBrush(Qt::NoBrush);
-      p.setPen(QPen(RoomStyle::Mix(RoomStyle::Window(pal), RoomStyle::Text(pal), 0.85), 2));
-      p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), radius + 1, radius + 1);
-    }
-    p.setPen(ink);
-    p.setFont(RoomStyle::Scaled(font(), 1.0, true));
-    p.drawText(rect(), Qt::AlignCenter, text());
-  }
-
- private:
-  bool primary_;
-};
-
 // The side rail background: slightly apart from the content, with a hairline on its right edge.
+// It also paints the navigation indicator, one pill that glides from the previous destination to the new one (instead of each button switching its own
+// highlight on and off). The glide repaints only the strip of the rail it moves through, and ends at rest.
 class RailWidget : public QWidget {
  public:
-  explicit RailWidget(QWidget *parent = nullptr) : QWidget(parent) {}
+  explicit RailWidget(QWidget *parent = nullptr) : QWidget(parent), glide_(new RoomTween(this, 0.0, 280, QEasingCurve::OutCubic)) {
+    QObject::connect(glide_, &RoomTween::Changed, this, [this]() { update(); });
+  }
+
+  // Moves the indicator to `target` (a button of the rail), or hides it for null.
+  void SetTarget(const QWidget *target, const bool animate = true) {
+    const QWidget *previous = target_;
+    target_ = target;
+    if (!target) {
+      visible_ = false;
+      update();
+      return;
+    }
+    const QRectF to = Geometry(target);
+    if (visible_ && target == previous && to == to_) return;
+    if (!visible_ || !animate) {
+      from_ = to_ = to;
+      visible_ = true;
+      glide_->Jump(1.0);
+      update();
+      return;
+    }
+    from_ = Current();
+    to_ = to;
+    glide_->Jump(0.0);
+    glide_->SetTarget(1.0);
+  }
+
+  // Where the indicator is, and where it is going (for tests).
+  QRectF indicator() const { return visible_ ? Current() : QRectF(); }
+  QRectF indicator_target() const { return visible_ ? to_ : QRectF(); }
+  bool gliding() const { return glide_->running(); }
 
  protected:
   void paintEvent(QPaintEvent *e) override {
@@ -140,21 +126,63 @@ class RailWidget : public QWidget {
     p.fillRect(rect(), RoomStyle::Rail(palette()));
     p.setPen(RoomStyle::Hairline(palette()));
     p.drawLine(width() - 1, 0, width() - 1, height());
+    if (!visible_) return;
+    // A moved or resized rail (compact mode) re-aims a resting indicator at its button.
+    if (!glide_->running() && target_) {
+      const QRectF now = Geometry(target_);
+      if (now != to_) from_ = to_ = now;
+    }
+    const QRectF r = Current();
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(Qt::NoPen);
+    p.setBrush(RoomStyle::Mix(RoomStyle::Rail(palette()), RoomStyle::Accent(palette()), 0.16));
+    p.drawRoundedRect(r, 10, 10);
+    p.setBrush(RoomStyle::Accent(palette()));
+    p.drawRoundedRect(QRectF(r.left(), r.top() + 9, 3, r.height() - 18), 1.5, 1.5);
   }
+
+ private:
+  QRectF Geometry(const QWidget *target) const {
+    return QRectF(target->geometry()).adjusted(0, 1, 0, -1);
+  }
+  QRectF Current() const {
+    const qreal t = glide_->value();
+    return QRectF(from_.left() + (to_.left() - from_.left()) * t, from_.top() + (to_.top() - from_.top()) * t, from_.width() + (to_.width() - from_.width()) * t, from_.height() + (to_.height() - from_.height()) * t);
+  }
+
+  RoomTween *glide_;
+  const QWidget *target_ = nullptr;
+  QRectF from_;
+  QRectF to_;
+  bool visible_ = false;
 };
 
 // The Adrift wordmark: a short wave in the accent color followed by the name and a small label.
+// While music plays the wave drifts slowly. Its timer exists only while playing, visible and with motion allowed, and repaints just the wave.
 class Wordmark : public QWidget {
  public:
-  explicit Wordmark(QWidget *parent = nullptr) : QWidget(parent), compact_(false) {
+  explicit Wordmark(QWidget *parent = nullptr) : QWidget(parent), compact_(false), timer_(new QTimer(this)) {
     setAccessibleName(QCoreApplication::translate("ListeningRoom", "Adrift"));
+    timer_->setInterval(45);
+    QObject::connect(timer_, &QTimer::timeout, this, [this]() {
+      phase_ = std::fmod(phase_ + 0.11, 6.2832);
+      update(WaveRect());
+    });
+    QObject::connect(RoomMotion::Instance(), &RoomMotion::ReducedChanged, this, [this]() { Sync(); });
   }
 
   void SetCompact(const bool compact) {
+    if (compact_ == compact) return;
     compact_ = compact;
     updateGeometry();
     update();
   }
+
+  void SetPlaying(const bool playing) {
+    playing_ = playing;
+    Sync();
+  }
+  bool timer_active() const { return timer_->isActive(); }
 
   QSize sizeHint() const override {
     const int name_height = QFontMetrics(RoomStyle::Scaled(font(), 1.7, true)).height();
@@ -163,20 +191,30 @@ class Wordmark : public QWidget {
   }
 
  protected:
+  void showEvent(QShowEvent *e) override {
+    QWidget::showEvent(e);
+    Sync();
+  }
+  void hideEvent(QHideEvent *e) override {
+    QWidget::hideEvent(e);
+    Sync();
+  }
+
   void paintEvent(QPaintEvent *e) override {
     Q_UNUSED(e)
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
     const QPalette &pal = palette();
 
-    // A single drifting wave line.
-    const qreal wave_width = compact_ ? 30 : 30;
+    // A single drifting wave line. At rest its phase is zero; while playing it travels.
+    const qreal wave_width = 30;
     const QPointF start(compact_ ? (width() - wave_width) / 2.0 : 20, 24);
     QPainterPath wave;
     wave.moveTo(start);
+    const qreal amplitude = 4.2 * (playing_ && !RoomMotion::Instance()->reduced() ? 1.0 + 0.18 * std::sin(phase_ * 0.5) : 1.0);
     for (int i = 0; i <= 30; ++i) {
       const qreal t = i / 30.0;
-      wave.lineTo(start.x() + t * wave_width, start.y() + std::sin(t * 6.2832 * 1.5) * 4.2 * (1.0 - 0.25 * t));
+      wave.lineTo(start.x() + t * wave_width, start.y() + std::sin(t * 6.2832 * 1.5 - phase_) * amplitude * (1.0 - 0.25 * t));
     }
     p.setPen(QPen(RoomStyle::Accent(pal), 2.2, Qt::SolidLine, Qt::RoundCap));
     p.setBrush(Qt::NoBrush);
@@ -196,7 +234,23 @@ class Wordmark : public QWidget {
   }
 
  private:
+  QRect WaveRect() const {
+    return QRect(static_cast<int>(compact_ ? (width() - 30) / 2.0 : 20) - 4, 24 - 9, 30 + 8, 18);
+  }
+  void Sync() {
+    const bool want = playing_ && isVisible() && !RoomMotion::Instance()->reduced();
+    if (want && !timer_->isActive()) timer_->start();
+    else if (!want && timer_->isActive()) {
+      timer_->stop();
+      phase_ = 0;
+      update(WaveRect());
+    }
+  }
+
   bool compact_;
+  bool playing_ = false;
+  qreal phase_ = 0;
+  QTimer *timer_;
 };
 
 // A stacked widget whose size hints are those of the page that is shown. The default takes the largest of all pages, so a hidden page with a large
@@ -297,86 +351,15 @@ class CardFrame : public QWidget {
   }
 };
 
-// A plain-text label whose color is derived from the palette every time it is painted, so runtime palette changes (a theme switch) apply at once.
-class ToneLabel : public QLabel {
- public:
-  explicit ToneLabel(const QString &text, QWidget *parent = nullptr) : QLabel(text, parent) {}
-
-  void SetTone(const ElidedLabel::Tone tone) {
-    tone_ = tone;
-    update();
-  }
-
- protected:
-  void paintEvent(QPaintEvent *e) override {
-    Q_UNUSED(e)
-    QPainter p(this);
-    QColor color = RoomStyle::Text(palette());
-    switch (tone_) {
-      case ElidedLabel::Tone::Muted:  color = RoomStyle::Muted(palette()); break;
-      case ElidedLabel::Tone::Faint:  color = RoomStyle::Faint(palette()); break;
-      case ElidedLabel::Tone::Accent: color = RoomStyle::Accent(palette()); break;
-      case ElidedLabel::Tone::Normal: break;
-    }
-    p.setPen(color);
-    p.setFont(font());
-    int flags = static_cast<int>(alignment());
-    if (wordWrap()) flags |= Qt::TextWordWrap;
-    p.drawText(contentsRect(), flags, text());
-  }
-
- private:
-  ElidedLabel::Tone tone_ = ElidedLabel::Tone::Normal;
-};
-
-QLabel *MakeLabel(const QString &text = QString(), const bool word_wrap = true);
-void Style(QLabel *label, const QFont &font, const ElidedLabel::Tone tone);
-
-// The heading of a page: a title over one line of description, with an optional widget at the right. Every page uses it, so the headings line up.
-QLabel *AddPageHeader(QVBoxLayout *layout, const QFont &base, const QString &title, const QString &description, QWidget *trailing = nullptr) {
-
-  QHBoxLayout *row = new QHBoxLayout;
-  row->setSpacing(16);
-  QVBoxLayout *titles = new QVBoxLayout;
-  titles->setSpacing(2);
-  QLabel *title_label = MakeLabel(title, false);
-  title_label->setObjectName(QStringLiteral("page_title"));
-  Style(title_label, RoomStyle::Scaled(base, 1.9, true), ElidedLabel::Tone::Normal);
-  QLabel *description_label = MakeLabel(description, false);
-  description_label->setObjectName(QStringLiteral("page_description"));
-  Style(description_label, base, ElidedLabel::Tone::Muted);
-  titles->addWidget(title_label);
-  titles->addWidget(description_label);
-  row->addLayout(titles, 1);
-  if (trailing) row->addWidget(trailing, 0, Qt::AlignTop);
-  layout->addLayout(row);
-  layout->addSpacing(14);
-  return title_label;
-
-}
-
-QLabel *MakeLabel(const QString &text, const bool word_wrap) {
-
-  ToneLabel *label = new ToneLabel(text);
-  label->setTextFormat(Qt::PlainText);
-  label->setWordWrap(word_wrap);
-  return label;
-
-}
-
-// Sets a label font and a palette-derived tone.
-void Style(QLabel *label, const QFont &font, const ElidedLabel::Tone tone) {
-
-  label->setFont(font);
-  static_cast<ToneLabel*>(label)->SetTone(tone);
-
-}
-
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------------------ nav button
 
-RoomNavButton::RoomNavButton(const QString &text, const Glyph glyph, QWidget *parent) : QAbstractButton(parent), glyph_(glyph), compact_(false) {
+RoomNavButton::RoomNavButton(const QString &text, const Glyph glyph, QWidget *parent)
+    : QAbstractButton(parent), glyph_(glyph), compact_(false), hover_(new RoomTween(this, 0.0, 150)), press_(new RoomTween(this, 0.0, 90)) {
+
+  QObject::connect(hover_, &RoomTween::Changed, this, [this]() { update(); });
+  QObject::connect(press_, &RoomTween::Changed, this, [this]() { update(); });
 
   setText(text);
   setCheckable(true);
@@ -390,6 +373,7 @@ RoomNavButton::RoomNavButton(const QString &text, const Glyph glyph, QWidget *pa
 
 void RoomNavButton::SetCompact(const bool compact) {
 
+  if (compact_ == compact) return;
   compact_ = compact;
   updateGeometry();
   update();
@@ -403,24 +387,40 @@ QSize RoomNavButton::sizeHint() const {
 
 }
 
+void RoomNavButton::enterEvent(QEnterEvent *e) {
+  QAbstractButton::enterEvent(e);
+  hover_->SetTarget(1.0);
+}
+
+void RoomNavButton::leaveEvent(QEvent *e) {
+  QAbstractButton::leaveEvent(e);
+  hover_->SetTarget(0.0);
+  press_->SetTarget(0.0);
+}
+
+void RoomNavButton::mousePressEvent(QMouseEvent *e) {
+  QAbstractButton::mousePressEvent(e);
+  if (isDown()) press_->SetTarget(1.0);
+}
+
+void RoomNavButton::mouseReleaseEvent(QMouseEvent *e) {
+  QAbstractButton::mouseReleaseEvent(e);
+  press_->SetTarget(0.0);
+}
+
 void RoomNavButton::paintEvent(QPaintEvent *e) {
 
   Q_UNUSED(e)
   QPainter p(this);
   p.setRenderHint(QPainter::Antialiasing);
   const QPalette &pal = palette();
-  const QRectF r = QRectF(rect()).adjusted(0, 1, 0, -1);
+  // A press sinks the button a little. The highlight of the current destination is the rail's gliding indicator, not painted here.
+  const qreal sink = press_->value() * 1.5;
+  const QRectF r = QRectF(rect()).adjusted(0, 1, 0, -1).adjusted(sink, sink, -sink, -sink);
 
-  if (isChecked()) {
+  if (!isChecked() && hover_->value() > 0.01) {
     p.setPen(Qt::NoPen);
-    p.setBrush(RoomStyle::Mix(RoomStyle::Rail(pal), RoomStyle::Accent(pal), 0.16));
-    p.drawRoundedRect(r, 10, 10);
-    p.setBrush(RoomStyle::Accent(pal));
-    p.drawRoundedRect(QRectF(r.left(), r.top() + 9, 3, r.height() - 18), 1.5, 1.5);
-  }
-  else if (underMouse()) {
-    p.setPen(Qt::NoPen);
-    p.setBrush(RoomStyle::Surface(pal, 0.07));
+    p.setBrush(RoomStyle::Surface(pal, 0.07 * hover_->value() + 0.04 * press_->value()));
     p.drawRoundedRect(r, 10, 10);
   }
   if (hasFocus()) {
@@ -463,6 +463,19 @@ void RoomNavButton::paintEvent(QPaintEvent *e) {
       p.setBrush(accent);
       p.drawEllipse(QPointF(box.center().x(), box.bottom() - 3), 1.8, 1.8);
       break;
+    case Glyph::Motion:
+      // Three waves that settle into flat lines when motion is reduced (the button is checked then).
+      for (int i = 0; i < 3; ++i) {
+        const qreal y = box.top() + 3 + i * 6;
+        QPainterPath line;
+        line.moveTo(box.left(), y);
+        for (int k = 0; k <= 12; ++k) {
+          const qreal t = k / 12.0;
+          line.lineTo(box.left() + t * box.width(), y + (isChecked() ? 0.0 : std::sin(t * 6.2832 + i) * 1.8));
+        }
+        p.drawPath(line);
+      }
+      break;
     case Glyph::Settings:
       for (int i = 0; i < 2; ++i) {
         const qreal y = box.top() + 5 + i * 8;
@@ -494,10 +507,12 @@ ListeningRoom::ListeningRoom(QWidget *parent)
       button_playlists_(nullptr),
       button_streaming_(nullptr),
       button_settings_(nullptr),
+      button_motion_(nullptr),
       wordmark_(nullptr),
       stack_(new PageStack),
       page_listening_(new QWidget),
-      library_container_(new QWidget),
+      library_(new LibraryView),
+      classic_container_(new QWidget),
       page_playlists_(new QWidget),
       page_streaming_(new QWidget),
       transport_(new TransportBar),
@@ -533,13 +548,15 @@ ListeningRoom::ListeningRoom(QWidget *parent)
   BuildStreamingPage();
 
   // The pages, in the order of View.
-  QVBoxLayout *library_layout = new QVBoxLayout(library_container_);
-  library_layout->setContentsMargins(0, 0, 0, 0);
-  library_layout->setSpacing(0);
+  QVBoxLayout *classic_layout = new QVBoxLayout(classic_container_);
+  classic_layout->setContentsMargins(0, 0, 0, 0);
+  classic_layout->setSpacing(0);
+  // The order of View: the classic window is the last page and has no rail button of its own.
   stack_->addWidget(page_listening_);
-  stack_->addWidget(library_container_);
+  stack_->addWidget(library_);
   stack_->addWidget(page_playlists_);
   stack_->addWidget(page_streaming_);
+  stack_->addWidget(classic_container_);
 
   QVBoxLayout *content = new QVBoxLayout;
   content->setContentsMargins(0, 0, 0, 0);
@@ -562,6 +579,22 @@ ListeningRoom::ListeningRoom(QWidget *parent)
   QObject::connect(button_playlists_, &QAbstractButton::clicked, this, [this]() { SetView(View::Playlists); });
   QObject::connect(button_streaming_, &QAbstractButton::clicked, this, [this]() { SetView(View::Streaming); });
   QObject::connect(button_settings_, &QAbstractButton::clicked, this, &ListeningRoom::SettingsRequested);
+  QObject::connect(button_motion_, &QAbstractButton::toggled, this, [this](const bool reduced) {
+    RoomMotion::Instance()->SetReduced(reduced);
+    Q_EMIT ReducedMotionChanged(reduced);
+  });
+  button_motion_->setChecked(RoomMotion::Instance()->reduced());
+  QObject::connect(RoomMotion::Instance(), &RoomMotion::ReducedChanged, this, [this](const bool reduced) {
+    if (button_motion_->isChecked() != reduced) {
+      QSignalBlocker blocker(button_motion_);
+      button_motion_->setChecked(reduced);
+      button_motion_->update();
+    }
+    button_motion_->setToolTip(reduced ? tr("Motion is reduced. Click to bring the animations back.") : tr("Reduce motion: turns the animations off."));
+  });
+  button_motion_->setToolTip(RoomMotion::Instance()->reduced() ? tr("Motion is reduced. Click to bring the animations back.") : tr("Reduce motion: turns the animations off."));
+  QObject::connect(library_, &LibraryView::ShowStreamingRequested, this, [this]() { SetView(View::Streaming); });
+  QObject::connect(library_, &LibraryView::AdvancedRequested, this, [this]() { SetView(View::Classic); });
 
   const View views[] = { View::Listening, View::Library, View::Playlists, View::Streaming };
   const int keys[] = { Qt::Key_1, Qt::Key_2, Qt::Key_3, Qt::Key_4 };
@@ -612,6 +645,7 @@ QString ListeningRoom::ViewToString(const View view) {
     case View::Library:   return QStringLiteral("library");
     case View::Playlists: return QStringLiteral("playlists");
     case View::Streaming: return QStringLiteral("streaming");
+    case View::Classic:   return QStringLiteral("classic");
   }
   return QStringLiteral("listening");
 
@@ -635,6 +669,7 @@ RoomNavButton *ListeningRoom::nav_button(const View view) const {
     case View::Library:   return button_library_;
     case View::Playlists: return button_playlists_;
     case View::Streaming: return button_streaming_;
+    case View::Classic:   return button_library_;
   }
   return nullptr;
 
@@ -644,7 +679,8 @@ QWidget *ListeningRoom::page(const View view) const {
 
   switch (view) {
     case View::Listening: return page_listening_;
-    case View::Library:   return library_container_;
+    case View::Library:   return library_;
+    case View::Classic:   return classic_container_;
     case View::Playlists: return page_playlists_;
     case View::Streaming: return page_streaming_;
   }
@@ -658,8 +694,9 @@ void ListeningRoom::SetView(const View view) {
   view_ = view;
   stack_->setCurrentIndex(static_cast<int>(view));
   nav_button(view)->setChecked(true);
-  // The Library hosts the classic window, which brings its own controls, so the room's transport steps aside there.
-  transport_->setVisible(view != View::Library);
+  RetargetRailIndicator();
+  // The classic window brings its own controls, so the room's transport steps aside there. Every other page keeps the room's transport.
+  transport_->setVisible(view != View::Classic);
   if (view == View::Listening) queue_view_->ScrollToCurrent();
   if (changed) Q_EMIT ViewChanged(view);
 
@@ -682,6 +719,9 @@ void ListeningRoom::BuildRail() {
   button_streaming_ = new RoomNavButton(tr("Streaming"), RoomNavButton::Glyph::Streaming);
   button_settings_ = new RoomNavButton(tr("Settings"), RoomNavButton::Glyph::Settings);
   button_settings_->setCheckable(false);
+  button_motion_ = new RoomNavButton(tr("Reduce motion"), RoomNavButton::Glyph::Motion);
+  button_motion_->setCheckable(true);
+  button_motion_->setAccessibleDescription(tr("Turns the animations of Adrift off. Checked means motion is reduced."));
 
   QVBoxLayout *layout = new QVBoxLayout(rail_);
   layout->setContentsMargins(12, 8, 12, 14);
@@ -693,6 +733,7 @@ void ListeningRoom::BuildRail() {
   layout->addWidget(button_playlists_);
   layout->addWidget(button_streaming_);
   layout->addStretch(1);
+  layout->addWidget(button_motion_);
   layout->addWidget(button_settings_);
 
 }
@@ -715,7 +756,7 @@ void ListeningRoom::BuildListeningPage() {
   meta->setSpacing(3);
 
   label_status_ = MakeLabel(QString(), false);
-  Style(label_status_, RoomStyle::Label(font()), ElidedLabel::Tone::Accent);
+  StyleLabel(label_status_, RoomStyle::Label(font()), ElidedLabel::Tone::Accent);
   label_status_->setAccessibleName(tr("Playback state"));
 
   label_title_->setFont(RoomStyle::Scaled(font(), 2.0, true));
@@ -730,7 +771,7 @@ void ListeningRoom::BuildListeningPage() {
   label_detail_->SetTone(ElidedLabel::Tone::Faint);
 
   label_empty_hint_ = MakeLabel(tr("Choose a playlist, open your Library, or import one from Tidal or Qobuz."));
-  Style(label_empty_hint_, RoomStyle::Scaled(font(), 1.1), ElidedLabel::Tone::Muted);
+  StyleLabel(label_empty_hint_, RoomStyle::Scaled(font(), 1.1), ElidedLabel::Tone::Muted);
 
   widget_empty_actions_ = new QWidget;
   QHBoxLayout *actions = new QHBoxLayout(widget_empty_actions_);
@@ -759,11 +800,11 @@ void ListeningRoom::BuildListeningPage() {
   QVBoxLayout *right = new QVBoxLayout;
   right->setSpacing(4);
   label_queue_heading_ = MakeLabel(tr("Playlist"), false);
-  Style(label_queue_heading_, RoomStyle::Label(font()), ElidedLabel::Tone::Faint);
+  StyleLabel(label_queue_heading_, RoomStyle::Label(font()), ElidedLabel::Tone::Faint);
   label_queue_sub_ = MakeLabel(QString(), false);
-  Style(label_queue_sub_, RoomStyle::Scaled(font(), 1.15, true), ElidedLabel::Tone::Normal);
+  StyleLabel(label_queue_sub_, RoomStyle::Scaled(font(), 1.15, true), ElidedLabel::Tone::Normal);
   label_queue_note_ = MakeLabel(QString(), true);
-  Style(label_queue_note_, font(), ElidedLabel::Tone::Muted);
+  StyleLabel(label_queue_note_, font(), ElidedLabel::Tone::Muted);
   button_queue_back_ = new RoomButton(tr("Show what is playing"));
   button_queue_back_->setVisible(false);
   QObject::connect(button_queue_back_, &QPushButton::clicked, this, &ListeningRoom::ShowPlayingQueueRequested);
@@ -808,7 +849,7 @@ void ListeningRoom::BuildPlaylistsPage() {
   layout->addWidget(playlists_list_, 1);
 
   label_playlists_empty_ = MakeLabel(tr("There are no open playlists yet. Import one, or build one in the Library."));
-  Style(label_playlists_empty_, RoomStyle::Scaled(font(), 1.1), ElidedLabel::Tone::Muted);
+  StyleLabel(label_playlists_empty_, RoomStyle::Scaled(font(), 1.1), ElidedLabel::Tone::Muted);
   label_playlists_empty_->setAlignment(Qt::AlignCenter);
   layout->addWidget(label_playlists_empty_);
   label_playlists_empty_->setVisible(false);
@@ -817,12 +858,37 @@ void ListeningRoom::BuildPlaylistsPage() {
 
 void ListeningRoom::BuildStreamingPage() {
 
-  QVBoxLayout *layout = new QVBoxLayout(page_streaming_);
+  // The page has two faces in the same window: the service cards (with the account and import panel), and a catalog that is being browsed.
+  QVBoxLayout *outer = new QVBoxLayout(page_streaming_);
+  outer->setContentsMargins(0, 0, 0, 0);
+  outer->setSpacing(0);
+  streaming_stack_ = new QStackedLayout;
+  outer->addLayout(streaming_stack_);
+  streaming_main_ = new QWidget;
+  streaming_stack_->addWidget(streaming_main_);
+
+  streaming_catalog_page_ = new QWidget;
+  catalog_layout_ = new QVBoxLayout(streaming_catalog_page_);
+  catalog_layout_->setContentsMargins(40, 28, 40, 0);
+  catalog_layout_->setSpacing(10);
+  button_catalog_back_ = new RoomButton(tr("‹  Streaming"));
+  button_catalog_back_->setAccessibleName(tr("Back to the streaming services"));
+  label_catalog_title_ = MakeLabel(QString(), false);
+  StyleLabel(label_catalog_title_, RoomStyle::Scaled(font(), 1.9, true), ElidedLabel::Tone::Normal);
+  QHBoxLayout *catalog_header = new QHBoxLayout;
+  catalog_header->setSpacing(16);
+  catalog_header->addWidget(button_catalog_back_);
+  catalog_header->addWidget(label_catalog_title_, 1);
+  catalog_layout_->addLayout(catalog_header);
+  streaming_stack_->addWidget(streaming_catalog_page_);
+  QObject::connect(button_catalog_back_, &QPushButton::clicked, this, &ListeningRoom::CloseCatalog);
+
+  QVBoxLayout *layout = new QVBoxLayout(streaming_main_);
   layout->setContentsMargins(40, 32, 40, 20);
   layout->setSpacing(10);
 
   QLabel *manual = MakeLabel(tr("Manual refresh"), false);
-  Style(manual, RoomStyle::Label(font()), ElidedLabel::Tone::Faint);
+  StyleLabel(manual, RoomStyle::Label(font()), ElidedLabel::Tone::Faint);
   manual->setObjectName(QStringLiteral("manual_refresh"));
   manual->setToolTip(tr("Imported playlists change only when you refresh them."));
   AddPageHeader(layout, font(), tr("Streaming"), tr("Import playlists from your accounts. Refresh your local copies whenever you want."), manual);
@@ -831,8 +897,70 @@ void ListeningRoom::BuildStreamingPage() {
   streaming_layout_->setContentsMargins(0, 0, 0, 0);
   streaming_layout_->setSpacing(12);
   layout->addWidget(streaming_cards_);
+
+  // The account and import panel is hosted here, under the cards.
+  QWidget *panel_host = new QWidget;
+  panel_host->setObjectName(QStringLiteral("streaming_panel_host"));
+  panel_layout_ = new QVBoxLayout(panel_host);
+  panel_layout_->setContentsMargins(0, 8, 0, 0);
+  panel_layout_->setSpacing(0);
+  layout->addWidget(panel_host);
   layout->addStretch(1);
 
+}
+
+void ListeningRoom::SetStreamingPanel(QWidget *panel) {
+
+  if (streaming_panel_ == panel) return;
+  if (streaming_panel_) {
+    panel_layout_->removeWidget(streaming_panel_);
+    streaming_panel_->hide();
+  }
+  streaming_panel_ = panel;
+  if (panel) {
+    panel_layout_->addWidget(panel);
+    panel->show();
+  }
+  SetView(View::Streaming);
+
+}
+
+void ListeningRoom::ShowCatalog(QWidget *widget, const QString &title) {
+
+  if (!widget) return;
+  if (catalog_widget_ && catalog_widget_ != widget) CloseCatalog();
+  catalog_widget_ = widget;
+  label_catalog_title_->setText(title);
+  catalog_layout_->addWidget(widget, 1);
+  widget->show();
+  streaming_stack_->setCurrentWidget(streaming_catalog_page_);
+  SetView(View::Streaming);
+
+}
+
+bool ListeningRoom::catalog_visible() const {
+  return catalog_widget_ && streaming_stack_->currentWidget() == streaming_catalog_page_;
+}
+
+void ListeningRoom::CloseCatalog() {
+
+  const bool was_showing = catalog_widget_ != nullptr;
+  if (catalog_widget_) {
+    catalog_layout_->removeWidget(catalog_widget_);
+    catalog_widget_->hide();
+    catalog_widget_ = nullptr;
+  }
+  streaming_stack_->setCurrentWidget(streaming_main_);
+  if (was_showing) Q_EMIT CatalogClosed();
+
+}
+
+void ListeningRoom::SetReducedMotion(const bool reduced) {
+  RoomMotion::Instance()->SetReduced(reduced);
+}
+
+bool ListeningRoom::reduced_motion() const {
+  return RoomMotion::Instance()->reduced();
 }
 
 // ------------------------------------------------------------------------------------------------------------ state
@@ -888,6 +1016,9 @@ void ListeningRoom::SetPlaybackState(const TransportBar::State state) {
   state_ = state;
   UpdateQueueHeader();
   transport_->SetState(state);
+  // Playing (not paused, not stopped) is what makes the wave drift and the record come out.
+  static_cast<Wordmark*>(wordmark_)->SetPlaying(state == TransportBar::State::Playing);
+  cover_->SetPlaying(state == TransportBar::State::Playing);
   queue_model_->SetPlaybackActive(state != TransportBar::State::Stopped);
   UpdateNowPlayingTexts();
   if (state == TransportBar::State::Stopped) {
@@ -993,7 +1124,7 @@ void ListeningRoom::RebuildStreamingCards() {
 
   if (services_.isEmpty()) {
     QLabel *none = MakeLabel(tr("No streaming service is built into this version of Adrift."));
-    Style(none, RoomStyle::Scaled(font(), 1.1), ElidedLabel::Tone::Muted);
+    StyleLabel(none, RoomStyle::Scaled(font(), 1.1), ElidedLabel::Tone::Muted);
     streaming_layout_->addWidget(none);
     return;
   }
@@ -1008,16 +1139,16 @@ void ListeningRoom::RebuildStreamingCards() {
     QVBoxLayout *text = new QVBoxLayout;
     text->setSpacing(2);
     QLabel *name = MakeLabel(service.name, false);
-    Style(name, RoomStyle::Scaled(font(), 1.35, true), ElidedLabel::Tone::Normal);
+    StyleLabel(name, RoomStyle::Scaled(font(), 1.35, true), ElidedLabel::Tone::Normal);
     QLabel *status = MakeLabel(service.status, false);
-    Style(status, font(), service.signed_in ? ElidedLabel::Tone::Accent : ElidedLabel::Tone::Muted);
+    StyleLabel(status, font(), service.signed_in ? ElidedLabel::Tone::Accent : ElidedLabel::Tone::Muted);
     status->setObjectName(QStringLiteral("status"));
     text->addWidget(name);
     text->addWidget(status);
     row->addLayout(text, 1);
 
     const QString key = service.key;
-    RoomButton *browse = new RoomButton(tr("Browse in Library"));
+    RoomButton *browse = new RoomButton(tr("Browse favorites"));
     RoomButton *import = new RoomButton(tr("Import playlists…"), true);
     RoomButton *settings = new RoomButton(service.signed_in ? tr("Account settings") : tr("Sign in…"));
     browse->setObjectName(QStringLiteral("browse"));
@@ -1025,7 +1156,7 @@ void ListeningRoom::RebuildStreamingCards() {
     settings->setObjectName(QStringLiteral("settings"));
     browse->setEnabled(service.signed_in);
     import->setEnabled(service.signed_in);
-    browse->setAccessibleName(tr("Browse %1 in the Library").arg(service.name));
+    browse->setAccessibleName(tr("Browse %1 favorites").arg(service.name));
     import->setAccessibleName(tr("Import playlists from %1").arg(service.name));
     settings->setAccessibleName(tr("%1 account settings").arg(service.name));
     QObject::connect(browse, &QPushButton::clicked, this, [this, key]() { Q_EMIT BrowseServiceRequested(key); });
@@ -1057,16 +1188,49 @@ void ListeningRoom::resizeEvent(QResizeEvent *e) {
 
 void ListeningRoom::ApplyResponsiveLayout() {
 
+  // A drag-resize sends a stream of sizes. The responsive layout has only two decisions (compact rail, stacked cover and queue), so nothing is touched
+  // unless one of them changes: setting a fixed width, margins or a direction invalidates every layout of the room, which used to happen on every size.
   const bool compact = width() < kCompactBelow;
+  const bool stacked = width() < kStackedBelow;
+  if (layout_applied_ && compact == layout_compact_ && stacked == layout_stacked_) return;
+  layout_applied_ = true;
+  layout_compact_ = compact;
+  layout_stacked_ = stacked;
   compact_ = compact;
+
   rail_->setFixedWidth(compact ? kRailWidthCompact : kRailWidth);
   static_cast<Wordmark*>(wordmark_)->SetCompact(compact);
-  for (RoomNavButton *button : { button_listening_, button_library_, button_playlists_, button_streaming_, button_settings_ }) button->SetCompact(compact);
+  for (RoomNavButton *button : { button_listening_, button_library_, button_playlists_, button_streaming_, button_settings_, button_motion_ }) button->SetCompact(compact);
   listening_layout_->setSpacing(compact ? 28 : 44);
   listening_layout_->setContentsMargins(compact ? 24 : 36, compact ? 20 : 28, compact ? 24 : 36, 16);
 
   // Below this width the queue moves under the cover instead of beside it.
-  listening_layout_->setDirection(width() < kStackedBelow ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
+  listening_layout_->setDirection(stacked ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
+  RetargetRailIndicator();
+
+}
+
+QRectF ListeningRoom::nav_indicator() const {
+  return static_cast<RailWidget*>(rail_)->indicator();
+}
+
+QRectF ListeningRoom::nav_indicator_target() const {
+  return static_cast<RailWidget*>(rail_)->indicator_target();
+}
+
+bool ListeningRoom::nav_indicator_gliding() const {
+  return static_cast<RailWidget*>(rail_)->gliding();
+}
+
+bool ListeningRoom::wordmark_animating() const {
+  return static_cast<Wordmark*>(wordmark_)->timer_active();
+}
+
+void ListeningRoom::RetargetRailIndicator() {
+
+  RoomNavButton *button = nav_button(view_);
+  // The indicator follows the button's final place, which the layout decides; this is called again once the layout has run.
+  static_cast<RailWidget*>(rail_)->SetTarget(button);
 
 }
 

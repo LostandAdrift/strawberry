@@ -843,6 +843,11 @@ set(SOURCES
   src/listeningroom/transportbar.cpp
   src/listeningroom/roomqueuemodel.cpp
   src/listeningroom/roomqueueview.cpp
+  src/listeningroom/roommotion.cpp
+  src/listeningroom/roomwidgets.cpp
+  src/listeningroom/librarysource.cpp
+  src/listeningroom/libraryparts.cpp
+  src/listeningroom/libraryview.cpp
   src/listeningroom/listeningroom.cpp
   src/widgets/stickyslider.cpp
   src/widgets/stretchheaderview.cpp
@@ -1165,6 +1170,11 @@ set(HEADERS
   src/listeningroom/transportbar.h
   src/listeningroom/roomqueuemodel.h
   src/listeningroom/roomqueueview.h
+  src/listeningroom/roommotion.h
+  src/listeningroom/roomwidgets.h
+  src/listeningroom/librarysource.h
+  src/listeningroom/libraryparts.h
+  src/listeningroom/libraryview.h
   src/listeningroom/listeningroom.h
   src/listeningroom/elidedlabel.h
   src/listeningroom/roomstyle.h

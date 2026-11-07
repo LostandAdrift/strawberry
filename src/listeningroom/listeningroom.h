@@ -26,6 +26,7 @@
 #include <QImage>
 #include <QList>
 #include <QMetaType>
+#include <QRectF>
 #include <QSize>
 #include <QString>
 #include <QWidget>
@@ -35,7 +36,10 @@
 
 class QBoxLayout;
 class QLabel;
+class QStackedLayout;
 class QListWidget;
+class QEnterEvent;
+class QMouseEvent;
 class QPaintEvent;
 class QPushButton;
 class QResizeEvent;
@@ -43,6 +47,8 @@ class QStackedWidget;
 class QVBoxLayout;
 class CoverArtWidget;
 class ElidedLabel;
+class LibraryView;
+class RoomTween;
 class Playlist;
 class RoomQueueModel;
 class RoomQueueView;
@@ -83,7 +89,8 @@ class RoomNavButton : public QAbstractButton {
     Library,
     Playlists,
     Streaming,
-    Settings
+    Settings,
+    Motion
   };
 
   RoomNavButton(const QString &text, const Glyph glyph, QWidget *parent = nullptr);
@@ -96,17 +103,25 @@ class RoomNavButton : public QAbstractButton {
 
  protected:
   void paintEvent(QPaintEvent *e) override;
+  void enterEvent(QEnterEvent *e) override;
+  void leaveEvent(QEvent *e) override;
+  void mousePressEvent(QMouseEvent *e) override;
+  void mouseReleaseEvent(QMouseEvent *e) override;
 
  private:
   Glyph glyph_;
   bool compact_;
+  RoomTween *hover_;
+  RoomTween *press_;
 };
 
-// The default main surface of Adrift. A side rail with the Adrift wordmark and the four destinations
-// (Listening, Library, Playlists, Streaming), the page of the selected destination, and a persistent transport bar.
+// The main surface of Adrift. A side rail with the Adrift wordmark and the four destinations (Listening, Library, Playlists, Streaming),
+// the page of the selected destination, and a persistent transport bar.
 //
-// The Library destination hosts the complete classic Strawberry window (collection, tabs, playlist editing, its own controls): MainWindow moves it into
-// library_container(). Nothing of it is removed or duplicated; the Listening Room is a different way in, not a replacement.
+// Every destination is part of the same app: the Library is a native page (LibraryView over the one collection), not the classic window.
+// The classic Strawberry window (collection tabs, tag editing, smart playlists, devices, ...) is kept for the cases that need it, as a separate
+// "advanced" page that MainWindow moves into classic_container(). It is only reachable through the explicit Advanced action of the Library; no default
+// route, account flow or import flow leads into it. Streaming catalogs are shown on the Streaming page itself (ShowCatalog), inside this window.
 //
 // The widget has no dependency on the application: it displays what it is given and emits requests. MainWindow connects those to the player,
 // the playlist manager and the existing actions. The queue shows a real Playlist through RoomQueueModel.
@@ -118,7 +133,8 @@ class ListeningRoom : public QWidget {
     Listening,
     Library,
     Playlists,
-    Streaming
+    Streaming,
+    Classic  // the classic Strawberry window, only through the Library's advanced action; the rail keeps "Library" lit
   };
 
   explicit ListeningRoom(QWidget *parent = nullptr);
@@ -143,7 +159,16 @@ class ListeningRoom : public QWidget {
   static View ViewFromString(const QString &value, const View fallback = View::Listening);
   RoomNavButton *nav_button(const View view) const;
   RoomNavButton *settings_button() const { return button_settings_; }
-  QWidget *library_container() const { return library_container_; }
+  LibraryView *library() const { return library_; }
+  // Where MainWindow puts the classic Strawberry window (the advanced page).
+  QWidget *classic_container() const { return classic_container_; }
+  RoomNavButton *motion_button() const { return button_motion_; }
+  // The gliding navigation indicator of the rail (rail coordinates): where it is drawn now, where it is going, and whether it is on its way.
+  QRectF nav_indicator() const;
+  QRectF nav_indicator_target() const;
+  bool nav_indicator_gliding() const;
+  // Whether the wordmark's wave is drifting (its timer runs only while playing, visible and with motion allowed).
+  bool wordmark_animating() const;
   QWidget *wordmark() const { return wordmark_; }
   QPushButton *queue_back_button() const { return button_queue_back_; }
   bool compact() const { return compact_; }
@@ -168,6 +193,21 @@ class ListeningRoom : public QWidget {
   // Playlists and streaming pages
   void SetPlaylists(const QList<RoomPlaylistCard> &playlists);
   void SetStreamingServices(const QList<RoomServiceCard> &services);
+
+  // A service catalog (for example the favorites of Tidal), shown on the Streaming page inside this window with a way back to the cards.
+  // The room does not own the widget: it takes it as a child while shown and gives it up (hides it) when the user goes back.
+  void ShowCatalog(QWidget *widget, const QString &title);
+  void CloseCatalog();
+  QWidget *catalog_widget() const { return catalog_widget_; }
+  bool catalog_visible() const;
+  QPushButton *catalog_back_button() const { return button_catalog_back_; }
+  // The panel the account and import flow lives in: shown on the Streaming page below the service cards, in this window. The room does not own it.
+  void SetStreamingPanel(QWidget *panel);
+  QWidget *streaming_panel() const { return streaming_panel_; }
+
+  // Motion. The preference itself is global (RoomMotion); the room only offers the control and tells the application when the user changes it.
+  void SetReducedMotion(const bool reduced);
+  bool reduced_motion() const;
 
   // Parts, for the signal path feed and for tests
   SignalPathWidget *signal_path_widget() const { return signal_path_; }
@@ -202,6 +242,8 @@ class ListeningRoom : public QWidget {
   void ServiceSettingsRequested(const QString &service_key);
   void SettingsRequested();
   void SignalPathDetailsRequested();
+  void ReducedMotionChanged(const bool reduced);
+  void CatalogClosed();
   // The user asked to go back from a browsed playlist to the queue of what is playing.
   void ShowPlayingQueueRequested();
 
@@ -215,6 +257,7 @@ class ListeningRoom : public QWidget {
   void BuildPlaylistsPage();
   void BuildStreamingPage();
   void ApplyResponsiveLayout();
+  void RetargetRailIndicator();
   void UpdateNowPlayingTexts();
   void UpdateQueueHeader();
   void RebuildStreamingCards();
@@ -232,12 +275,17 @@ class ListeningRoom : public QWidget {
   RoomNavButton *button_playlists_;
   RoomNavButton *button_streaming_;
   RoomNavButton *button_settings_;
+  RoomNavButton *button_motion_;
   QWidget *wordmark_;
+  bool layout_compact_ = false;
+  bool layout_stacked_ = false;
+  bool layout_applied_ = false;
 
   // Pages
   QStackedWidget *stack_;
   QWidget *page_listening_;
-  QWidget *library_container_;
+  LibraryView *library_;
+  QWidget *classic_container_;
   QWidget *page_playlists_;
   QWidget *page_streaming_;
   TransportBar *transport_;
@@ -272,6 +320,15 @@ class ListeningRoom : public QWidget {
   // Streaming page
   QWidget *streaming_cards_;
   QVBoxLayout *streaming_layout_;
+  QStackedLayout *streaming_stack_ = nullptr;
+  QWidget *streaming_main_ = nullptr;
+  QWidget *streaming_catalog_page_ = nullptr;
+  QVBoxLayout *catalog_layout_ = nullptr;
+  QPushButton *button_catalog_back_ = nullptr;
+  QLabel *label_catalog_title_ = nullptr;
+  QWidget *catalog_widget_ = nullptr;
+  QVBoxLayout *panel_layout_ = nullptr;
+  QWidget *streaming_panel_ = nullptr;
 };
 
 Q_DECLARE_METATYPE(ListeningRoom::View)

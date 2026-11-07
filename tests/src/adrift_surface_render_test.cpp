@@ -21,12 +21,19 @@
 // playlists and streaming pages, filled with synthetic data. Covers are drawn by code. The images are for review only; nothing reads the user's
 // configuration, library, database or accounts. Run on Qt's offscreen platform, so no window appears on screen.
 //
-// The Library page hosts the classic window, which only exists inside MainWindow (it needs the full application and a database). Here that page
-// shows a plainly labelled stand-in instead.
+// The Library page is the production LibraryView, fed by a synthetic LibrarySource (invented artists and albums, covers drawn by code).
+// The advanced classic window only exists inside MainWindow (it needs the full application and a database) and is not rendered here.
 
 #include "gtest_include.h"
 
+#include <memory>
+
 #include <QApplication>
+#include <QMenuBar>
+#include <QSplitter>
+#include <QSignalSpy>
+#include <QTabBar>
+#include <QTest>
 #include <QDir>
 #include <QImage>
 #include <QLabel>
@@ -39,7 +46,12 @@
 #include "core/themepalette.h"
 #include "engine/signalpath.h"
 #include "listeningroom/coverartwidget.h"
+#include "listeningroom/libraryparts.h"
+#include "listeningroom/libraryview.h"
 #include "listeningroom/listeningroom.h"
+#include "listeningroom/roommotion.h"
+#include "listeningroom/roomwidgets.h"
+#include "library_fixture.h"
 #include "listeningroom/transportbar.h"
 #include "listeningroom_fixture.h"
 #include "widgets/signalpathwidget.h"
@@ -152,9 +164,6 @@ QList<RoomServiceCard> SampleServices() {
 struct Surface {
   explicit Surface(const QString &theme, const int width, const int height) {
     room.setPalette(PaletteNamed(theme));
-    QLabel *stand_in = new QLabel(QStringLiteral("The classic Strawberry window appears here.\n(Stand-in for this render: it is hosted by MainWindow.)"));
-    stand_in->setAlignment(Qt::AlignCenter);
-    room.library_container()->layout()->addWidget(stand_in);
     room.SetPlaylists(SamplePlaylists());
     room.SetStreamingServices(SampleServices());
     room.resize(width, height);
@@ -173,10 +182,42 @@ struct Surface {
     room.signal_path_widget()->SetReport(report);
   }
 
+  // Waits until every animation has come to rest and the covers on screen have arrived: the render is the settled state, not a frame in between.
+  void Settle() {
+    for (int i = 0; i < 300; ++i) {
+      QCoreApplication::processEvents();
+      const bool motion_done = !room.nav_indicator_gliding() && !room.cover()->fading() && !room.cover()->settle_pending();
+      const bool record_done = room.cover()->record_amount() == 0.0 || room.cover()->record_amount() == 1.0;
+      const bool covers_done = room.library()->album_model()->in_flight() == 0;
+      if (motion_done && record_done && covers_done && i > 3) {
+        QCoreApplication::processEvents();
+        // One more pass: covers that arrived just now are painted, and any request their painting made is answered.
+        QTest::qWait(30);
+        if (room.library()->album_model()->in_flight() == 0) return;
+      }
+      QTest::qWait(10);
+    }
+  }
+
+  // The Library page with a synthetic library. `albums` of zero is an empty library.
+  void ShowLibrary(const int albums, const QString &search = QString()) {
+    library_source = std::make_unique<FakeLibrarySource>(albums);
+    room.library()->SetSource(library_source.get());
+    room.show();
+    room.SetView(ListeningRoom::View::Library);
+    QSignalSpy settled(room.library(), &LibraryView::AlbumsSettled);
+    if (!room.library()->loaded()) settled.wait(5000);
+    if (!search.isEmpty()) {
+      room.library()->SetSearchText(search);
+      QTest::qWait(150);
+    }
+  }
+
   QImage Capture() {
     room.show();
     QCoreApplication::processEvents();
     room.layout()->activate();
+    Settle();
     // The file names say 1440x900 or 1000x700: the render must really be that size, not whatever the minimums allowed.
     EXPECT_EQ(requested_, room.size());
     // The first widget of a freshly shown window takes the focus; its keyboard focus ring does not belong in a still image.
@@ -187,6 +228,7 @@ struct Surface {
 
   RoomFixture::QueueFixture queue{ 14 };
   ListeningRoom room;
+  std::unique_ptr<FakeLibrarySource> library_source;
   QSize requested_;
 };
 
@@ -274,7 +316,7 @@ TEST_F(SurfaceRenderTest, PlaylistsStreamingAndLibraryPages) {
     ListeningRoom::View view;
     const char *name;
   };
-  for (const Page page : { Page{ ListeningRoom::View::Playlists, "playlists" }, Page{ ListeningRoom::View::Streaming, "streaming" }, Page{ ListeningRoom::View::Library, "library_standin" } }) {
+  for (const Page page : { Page{ ListeningRoom::View::Playlists, "playlists" }, Page{ ListeningRoom::View::Streaming, "streaming" } }) {
     Surface surface(QStringLiteral("adrift-dark"), 1440, 900);
     surface.Play(3, TransportBar::State::Playing);
     surface.room.SetView(page.view);
@@ -331,5 +373,156 @@ TEST_F(SurfaceRenderTest, TheSurfaceIsNotMostlyEmpty) {
 
   // The cover is large: at 1440x900 its sleeve covers a substantial part of the page height.
   EXPECT_GE(surface.room.cover()->SleeveRect().height(), 380);
+
+}
+
+// --------------------------------------------------------------------------------------------------------------- the native Library
+
+namespace {
+
+// The Library page of the room must be a page of Adrift, not a smaller copy of the classic window.
+void ExpectNoMiniatureStrawberry(ListeningRoom &room) {
+
+  EXPECT_TRUE(room.library()->findChildren<QMenuBar*>().isEmpty());
+  EXPECT_TRUE(room.library()->findChildren<QSplitter*>().isEmpty());
+  EXPECT_TRUE(room.library()->findChildren<TransportBar*>().isEmpty());
+  for (QTabBar *bar : room.library()->findChildren<QTabBar*>()) EXPECT_FALSE(bar->isVisible());
+  // Exactly one transport, one rail, one set of destinations: those of the room.
+  int transports = 0;
+  for (TransportBar *bar : room.findChildren<TransportBar*>()) {
+    if (bar->isVisible()) ++transports;
+  }
+  EXPECT_EQ(1, transports);
+
+}
+
+}  // namespace
+
+TEST_F(SurfaceRenderTest, LibraryPopulatedWideAndCompact) {
+
+  struct Size {
+    int width;
+    int height;
+    const char *name;
+  };
+  for (const Size size : { Size{ 1440, 900, "1440x900" }, Size{ 1000, 700, "1000x700" }, Size{ 800, 640, "800x640" } }) {
+    Surface surface(QStringLiteral("adrift-dark"), size.width, size.height);
+    surface.Play(3, TransportBar::State::Playing);
+    surface.ShowLibrary(36);
+    const QImage image = surface.Capture();
+    ExpectNoMiniatureStrawberry(surface.room);
+    EXPECT_TRUE(surface.room.library()->grid()->isVisible());
+    EXPECT_GE(surface.room.library()->grid()->columns(), 2);
+    Save(image, QStringLiteral("room_library_populated_%1").arg(QLatin1String(size.name)));
+  }
+
+}
+
+TEST_F(SurfaceRenderTest, LibraryEmptyAndNoMatches) {
+
+  for (const QSize size : { QSize(1440, 900), QSize(1000, 700) }) {
+    Surface surface(QStringLiteral("adrift-dark"), size.width(), size.height());
+    surface.ShowLibrary(0);
+    EXPECT_EQ(LibraryView::State::Empty, surface.room.library()->state());
+    const QImage image = surface.Capture();
+    ExpectNoMiniatureStrawberry(surface.room);
+    EXPECT_TRUE(surface.room.library()->notice()->primary_button()->isVisible());
+    Save(image, QStringLiteral("room_library_empty_%1x%2").arg(size.width()).arg(size.height()));
+  }
+  {
+    Surface surface(QStringLiteral("adrift-dark"), 1440, 900);
+    surface.ShowLibrary(30, QStringLiteral("zzzzqqq"));
+    EXPECT_EQ(LibraryView::State::NoMatches, surface.room.library()->state());
+    Save(surface.Capture(), QStringLiteral("room_library_no_matches_1440x900"));
+  }
+
+}
+
+TEST_F(SurfaceRenderTest, LibrarySearchArtistsAlbumPageAndHover) {
+
+  {
+    Surface surface(QStringLiteral("adrift-dark"), 1440, 900);
+    surface.Play(4, TransportBar::State::Paused);
+    surface.ShowLibrary(40, QStringLiteral("harbour"));
+    EXPECT_EQ(LibraryView::State::Browsing, surface.room.library()->state());
+    EXPECT_GT(surface.room.library()->album_count(), 0);
+    Save(surface.Capture(), QStringLiteral("room_library_search_1440x900"));
+  }
+  {
+    Surface surface(QStringLiteral("adrift-dark"), 1440, 900);
+    surface.Play(4, TransportBar::State::Playing);
+    surface.ShowLibrary(40);
+    surface.room.library()->SetMode(LibraryView::Mode::Artists);
+    Save(surface.Capture(), QStringLiteral("room_library_artists_1440x900"));
+  }
+  for (const QSize size : { QSize(1440, 900), QSize(1000, 700) }) {
+    Surface surface(QStringLiteral("adrift-dark"), size.width(), size.height());
+    surface.Play(4, TransportBar::State::Playing);
+    surface.ShowLibrary(40);
+    surface.room.library()->OpenAlbum(surface.room.library()->album_model()->album(5));
+    QTRY_VERIFY_WITH_TIMEOUT(surface.room.library()->track_model()->rowCount() > 0, 3000);
+    Save(surface.Capture(), QStringLiteral("room_library_album_%1x%2").arg(size.width()).arg(size.height()));
+  }
+  {
+    // A tile under the pointer: lifted, with its play button, once the hover has settled.
+    Surface surface(QStringLiteral("adrift-dark"), 1440, 900);
+    surface.Play(4, TransportBar::State::Playing);
+    surface.ShowLibrary(40);
+    surface.Capture();
+    QTest::mouseMove(surface.room.library()->grid()->viewport(), surface.room.library()->grid()->CoverRect(6).center());
+    QTest::qWait(400);
+    EXPECT_EQ(6, surface.room.library()->grid()->hover_row());
+    EXPECT_DOUBLE_EQ(1.0, surface.room.library()->grid()->hover_amount());
+    Save(surface.room.grab().toImage(), QStringLiteral("room_library_hover_1440x900"));
+  }
+
+}
+
+TEST_F(SurfaceRenderTest, LibraryInTheOtherPalettes) {
+
+  for (const QString &theme : { QStringLiteral("omarchy"), QStringLiteral("system") }) {
+    Surface surface(theme, 1440, 900);
+    surface.Play(5, TransportBar::State::Playing);
+    surface.ShowLibrary(36);
+    Save(surface.Capture(), QStringLiteral("room_library_%1_1440x900").arg(theme));
+  }
+
+}
+
+TEST_F(SurfaceRenderTest, SettledMotionStates) {
+
+  {
+    // Playing: the record is out from behind the sleeve, the wave is drifting, the indicator rests under the destination.
+    Surface surface(QStringLiteral("adrift-dark"), 1440, 900);
+    surface.Play(3, TransportBar::State::Playing);
+    const QImage image = surface.Capture();
+    EXPECT_DOUBLE_EQ(1.0, surface.room.cover()->record_amount());
+    EXPECT_FALSE(surface.room.nav_indicator_gliding());
+    Save(image, QStringLiteral("room_motion_playing_1440x900"));
+  }
+  {
+    // Paused: the record has slid back behind the sleeve.
+    Surface surface(QStringLiteral("adrift-dark"), 1440, 900);
+    surface.Play(3, TransportBar::State::Playing);
+    surface.Capture();
+    surface.room.SetPlaybackState(TransportBar::State::Paused);
+    const QImage image = surface.Capture();
+    EXPECT_DOUBLE_EQ(0.0, surface.room.cover()->record_amount());
+    Save(image, QStringLiteral("room_motion_paused_1440x900"));
+  }
+  {
+    // Reduced motion: the same states, reached without animation, and nothing turns.
+    RoomMotion::Instance()->SetReduced(true);
+    Surface surface(QStringLiteral("adrift-dark"), 1440, 900);
+    surface.Play(3, TransportBar::State::Playing);
+    surface.room.SetView(ListeningRoom::View::Playlists);
+    EXPECT_FALSE(surface.room.nav_indicator_gliding());
+    EXPECT_EQ(surface.room.nav_indicator(), surface.room.nav_indicator_target());
+    EXPECT_FALSE(surface.room.cover()->spin_timer_active());
+    EXPECT_FALSE(surface.room.wordmark_animating());
+    surface.room.SetView(ListeningRoom::View::Listening);
+    Save(surface.Capture(), QStringLiteral("room_motion_reduced_1440x900"));
+    RoomMotion::Instance()->SetReduced(false);
+  }
 
 }

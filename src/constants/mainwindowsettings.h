@@ -27,6 +27,7 @@ constexpr char kSearchForCoverAuto[] = "search_for_cover_auto";
 constexpr char kShowSidebar[] = "show_sidebar";
 // The last view the user chose in the Listening Room (listening, library, playlists, streaming). Absent means the Listening Room opens.
 constexpr char kMainView[] = "main_view";
+constexpr char kReducedMotion[] = "adrift_reduced_motion";
 constexpr char kMaximized[] = "maximized";
 constexpr char kMinimized[] = "minimized";
 constexpr char kHidden[] = "hidden";

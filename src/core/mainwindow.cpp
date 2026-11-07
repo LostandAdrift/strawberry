@@ -113,6 +113,8 @@
 #include "engine/enginebase.h"
 #include "dialogs/errordialog.h"
 #include "dialogs/signalpathdialog.h"
+#include "listeningroom/libraryview.h"
+#include "listeningroom/librarysource.h"
 #include "listeningroom/listeningroom.h"
 #include "listeningroom/roomqueuemodel.h"
 #include "listeningroom/transportbar.h"
@@ -464,7 +466,7 @@ MainWindow::MainWindow(Application *app,
   // The Listening Room is the main surface. The complete classic window becomes its Library page.
   room_ = new ListeningRoom(this);
   ui_->layout_centralWidget->removeWidget(ui_->splitter);
-  room_->library_container()->layout()->addWidget(ui_->splitter);
+  room_->classic_container()->layout()->addWidget(ui_->splitter);
   ui_->layout_centralWidget->addWidget(room_);
 
 #ifdef _MSC_VER
@@ -1382,7 +1384,7 @@ void MainWindow::ReloadSettings() {
   bool enable_tidal = s.value(TidalSettings::kEnabled, TidalSettings::kDefaultEnabled).toBool();
   s.endGroup();
   if (enable_tidal) {
-    ui_->tabs->EnableTab(tidal_view_);
+    if (tidal_view_ != room_catalog_view_) ui_->tabs->EnableTab(tidal_view_);
   }
   else {
     ui_->tabs->DisableTab(tidal_view_);
@@ -1406,7 +1408,7 @@ void MainWindow::ReloadSettings() {
   bool enable_qobuz = s.value(QobuzSettings::kEnabled, QobuzSettings::kDefaultEnabled).toBool();
   s.endGroup();
   if (enable_qobuz) {
-    ui_->tabs->EnableTab(qobuz_view_);
+    if (qobuz_view_ != room_catalog_view_) ui_->tabs->EnableTab(qobuz_view_);
   }
   else {
     ui_->tabs->DisableTab(qobuz_view_);
@@ -1867,12 +1869,37 @@ void MainWindow::SetupListeningRoom() {
   QObject::connect(room_, &ListeningRoom::ViewChanged, this, [this](const ListeningRoom::View view) {
     Settings s;
     s.beginGroup(MainWindowSettings::kSettingsGroup);
-    s.setValue(MainWindowSettings::kMainView, ListeningRoom::ViewToString(view));
+    // The advanced (classic) page is never the start view: the next start opens the Library, or whatever the user chose before.
+    if (view != ListeningRoom::View::Classic) s.setValue(MainWindowSettings::kMainView, ListeningRoom::ViewToString(view));
     s.endGroup();
+    // Leaving the Streaming page, or opening the advanced page, gives a hosted catalog back to its tab.
+    if (view != ListeningRoom::View::Streaming) room_->CloseCatalog();
     if (view == ListeningRoom::View::Streaming) RefreshRoomStreaming();
     if (view == ListeningRoom::View::Playlists) RefreshRoomPlaylists();
   });
   QObject::connect(room_, &ListeningRoom::QueueRowActivated, this, &MainWindow::RoomQueueRowActivated);
+  QObject::connect(room_, &ListeningRoom::CatalogClosed, this, &MainWindow::RoomCatalogClosed);
+
+  // The Library page is native. It reads the one collection through the existing backend and cover loader, and every action goes through the playlist manager.
+  CollectionLibrarySource *library_source = new CollectionLibrarySource(app_->collection()->backend().get(), app_->albumcover_loader(), this);
+  room_->library()->SetSource(library_source);
+  QObject::connect(room_->library(), &LibraryView::PlayRequested, this, &MainWindow::RoomLibraryPlay);
+  QObject::connect(room_->library(), &LibraryView::AddRequested, this, [this](const SongList &songs, const LibraryView::AddMode mode) { RoomLibraryAdd(songs, static_cast<int>(mode)); });
+  QObject::connect(room_->library(), &LibraryView::AddMusicRequested, this, &MainWindow::OpenCollectionSettingsDialog);
+
+  // The reduced-motion preference is kept in the settings and applied now.
+  {
+    Settings motion_settings;
+    motion_settings.beginGroup(MainWindowSettings::kSettingsGroup);
+    if (motion_settings.contains(MainWindowSettings::kReducedMotion)) room_->SetReducedMotion(motion_settings.value(MainWindowSettings::kReducedMotion).toBool());
+    motion_settings.endGroup();
+  }
+  QObject::connect(room_, &ListeningRoom::ReducedMotionChanged, this, [](const bool reduced) {
+    Settings s;
+    s.beginGroup(MainWindowSettings::kSettingsGroup);
+    s.setValue(MainWindowSettings::kReducedMotion, reduced);
+    s.endGroup();
+  });
   QObject::connect(room_, &ListeningRoom::PlaylistActivated, this, &MainWindow::RoomPlaylistActivated);
   QObject::connect(room_, &ListeningRoom::ImportPlaylistsRequested, this, [this](const QString &service_key) { ShowPlaylistImportDialog(service_key); });
   QObject::connect(room_, &ListeningRoom::BrowseServiceRequested, this, &MainWindow::RoomBrowseService);
@@ -2044,18 +2071,94 @@ void MainWindow::RoomPlaylistActivated(const int playlist_id) {
 
 void MainWindow::RoomBrowseService(const QString &key) {
 
-  // Opens the service's own tab in the Library, where the full browsing and searching lives.
+  // The service's catalog is shown on the Streaming page of this window, with a way back. It is never shown inside the classic window.
   QWidget *view = nullptr;
+  QString name;
 #ifdef HAVE_TIDAL
-  if (key == "tidal"_L1) view = tidal_view_;
+  if (key == "tidal"_L1) {
+    view = tidal_view_;
+    name = u"Tidal"_s;
+  }
 #endif
 #ifdef HAVE_QOBUZ
-  if (key == "qobuz"_L1) view = qobuz_view_;
+  if (key == "qobuz"_L1) {
+    view = qobuz_view_;
+    name = u"Qobuz"_s;
+  }
 #endif
   if (!view) return;
-  room_->SetView(ListeningRoom::View::Library);
-  const int index = ui_->tabs->IndexOfTab(view);
-  if (index >= 0) ui_->tabs->SetCurrentIndex(index);
+
+  // The view is moved out of its tab for as long as the room shows it, and goes back when the user returns.
+  if (room_catalog_view_ && room_catalog_view_ != view) room_->CloseCatalog();
+  ui_->tabs->DisableTab(view);
+  room_catalog_view_ = view;
+  room_->ShowCatalog(view, name);
+
+}
+
+void MainWindow::RoomCatalogClosed() {
+
+  QWidget *view = room_catalog_view_;
+  room_catalog_view_ = nullptr;
+  if (!view) return;
+  // Back into its tab, but only if that service is enabled (the settings decide, as before).
+  bool enabled = false;
+  Settings s;
+#ifdef HAVE_TIDAL
+  if (view == tidal_view_) {
+    s.beginGroup(TidalSettings::kSettingsGroup);
+    enabled = s.value(TidalSettings::kEnabled, TidalSettings::kDefaultEnabled).toBool();
+    s.endGroup();
+  }
+#endif
+#ifdef HAVE_QOBUZ
+  if (view == qobuz_view_) {
+    s.beginGroup(QobuzSettings::kSettingsGroup);
+    enabled = s.value(QobuzSettings::kEnabled, QobuzSettings::kDefaultEnabled).toBool();
+    s.endGroup();
+  }
+#endif
+  if (enabled) ui_->tabs->EnableTab(view);
+
+}
+
+void MainWindow::RoomLibraryPlay(const SongList &songs, const int start_index) {
+
+  if (songs.isEmpty() || start_index < 0 || start_index >= songs.count()) return;
+
+  // Same as playing an album from the classic window: the songs are added to the current playlist and the chosen one plays.
+  Playlist *playlist = app_->playlist_manager()->current();
+  if (!playlist) return;
+  const int first_new = playlist->rowCount(QModelIndex());
+  playlist->InsertSongs(songs, -1, false, false, false, false);
+
+  // Find the row of the chosen song among the new rows (the playlist may have sorted them).
+  const QUrl wanted = songs.at(start_index).url();
+  int row = -1;
+  for (int i = std::max(0, first_new - 1); i < playlist->rowCount(QModelIndex()); ++i) {
+    const PlaylistItemPtr &item = playlist->item_at(i);
+    if (item && item->OriginalMetadata().url() == wanted && i >= first_new) {
+      row = i;
+      break;
+    }
+  }
+  if (row < 0) row = std::min(first_new + start_index, playlist->rowCount(QModelIndex()) - 1);
+  if (row < 0) return;
+
+  room_browsed_playlist_id_ = -1;
+  app_->playlist_manager()->SetActiveToCurrent();
+  app_->player()->PlayAt(row, false, 0, EngineBase::TrackChangeType::Manual, Playlist::AutoScroll::Maybe, true);
+
+}
+
+void MainWindow::RoomLibraryAdd(const SongList &songs, const int mode) {
+
+  if (songs.isEmpty()) return;
+  Playlist *playlist = app_->playlist_manager()->current();
+  if (!playlist) return;
+  // mode 1 is LibraryView::AddMode::PlayNext: the songs are queued after the current track. Otherwise they are appended to the playlist.
+  const bool play_next = mode == static_cast<int>(LibraryView::AddMode::PlayNext);
+  playlist->InsertSongs(songs, -1, false, false, play_next, false);
 
 }
 
