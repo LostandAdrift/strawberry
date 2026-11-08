@@ -66,6 +66,10 @@ class RoomButton : public QPushButton {
   QSize sizeHint() const override;
   QSize minimumSizeHint() const override { return sizeHint(); }
 
+  // The main action of a page is filled with the accent; everything else is an outline. It can change with the state of the page (Sign in, then Reconnect).
+  void SetPrimary(const bool primary);
+  bool primary() const { return primary_; }
+
   // The hover and press amounts (0 to 1), for tests.
   double hover_amount() const;
   double press_amount() const;

@@ -98,7 +98,7 @@ class FakeAccount : public AccountBackend {
     field.label = QStringLiteral("Client ID");
     return QList<SetupField>() << field;
   }
-  QString setup_help() const override { return QStringLiteral("Needs a developer client ID."); }
+  QString setup_help() const override { return help_text; }
   QString signin_help() const override { return QStringLiteral("Your browser opens the sign-in page."); }
   bool SaveSetup(const QMap<QString, QString> &values, QString *error) override {
     ++save_calls;
@@ -110,26 +110,36 @@ class FakeAccount : public AccountBackend {
     is_configured = true;
     return true;
   }
-  void StartSignIn() override { ++start_calls; }
-  void CancelSignIn() override { ++cancel_calls; }
+  void StartSignIn(const quint64 attempt) override {
+    ++start_calls;
+    last_attempt = attempt;
+    BeginAttempt(attempt);
+    EndStart(attempt * 1000);  // the fake service's own numbering
+  }
+  void CancelSignIn() override {
+    ++cancel_calls;
+    ReleaseAttempt();
+  }
   void SignOut() override { signed_in = false; ++signout_calls; }
 
   // What the real service would do when the browser returns.
   void FinishSuccess(const QString &new_account = QStringLiteral("42")) {
     signed_in = true;
     account = new_account;
-    Q_EMIT SignInSucceeded();
+    Q_EMIT SignInSucceeded(last_attempt);
   }
-  void FinishFailure(const QString &message) { Q_EMIT SignInFailed(message); }
+  void FinishFailure(const QString &message) { Q_EMIT SignInFailed(last_attempt, message); }
   void LoseSession() {
     signed_in = false;
     Q_EMIT SessionChanged();
   }
 
+  QString help_text = QStringLiteral("Needs a developer client ID.");
   bool signed_in = false;
   bool is_configured = true;
   QString account = QStringLiteral("42");
   QString saved_client_id;
+  quint64 last_attempt = 0;
   int start_calls = 0;
   int cancel_calls = 0;
   int signout_calls = 0;
@@ -321,7 +331,7 @@ TEST(AccountSessionTest, CancelStopsTheFlowAndLateCallbacksAreIgnored) {
   // The browser answers after the user gave up: neither a failure nor a success may show up.
   account.FinishFailure(QStringLiteral("late"));
   account.signed_in = false;
-  Q_EMIT account.SignInSucceeded();
+  Q_EMIT account.SignInSucceeded(account.last_attempt);
   EXPECT_EQ(finished.count(), 1);
   EXPECT_EQ(session.state(), AccountSession::State::SignedOut);
 }
@@ -332,11 +342,19 @@ TEST(AccountSessionTest, AStaleSuccessDoesNotEndTheNextAttempt) {
   AccountSession session(&account);
   QSignalSpy finished(&session, &AccountSession::SignInFinished);
   session.SignIn();
+  const quint64 first = account.last_attempt;
   session.Cancel();
   session.SignIn();
   const int second = session.attempt();
-  // The first attempt's success arrives while the second one waits and the service holds no session: ignored.
-  Q_EMIT account.SignInSucceeded();
+  ASSERT_NE(first, account.last_attempt);
+  // The first attempt's success arrives while the second one waits and the service holds no session: ignored. Even when the service DOES hold a session
+  // (a background refresh finished meanwhile) an event that carries the first attempt's number cannot complete the second sign-in.
+  Q_EMIT account.SignInSucceeded(first);
+  EXPECT_EQ(session.state(), AccountSession::State::SigningIn);
+  account.signed_in = true;
+  Q_EMIT account.SignInSucceeded(first);
+  Q_EMIT account.SignInFailed(first, QStringLiteral("stale failure"));
+  account.signed_in = false;
   EXPECT_EQ(session.state(), AccountSession::State::SigningIn);
   EXPECT_EQ(session.attempt(), second);
   EXPECT_EQ(finished.count(), 1);  // only the cancel
@@ -846,7 +864,7 @@ TEST_F(OAuthCallbackTest, CallbackOfAnEarlierAttemptIsIgnoredWithoutEchoingState
   oauth.ExternalAuthorizationUrlReceived(Callback(old_state));
   ASSERT_EQ(results.count(), 1);
   EXPECT_FALSE(results.at(0));
-  EXPECT_NE(errors.at(0).indexOf(QStringLiteral("earlier sign-in attempt")), -1);
+  EXPECT_NE(errors.at(0).indexOf(QStringLiteral("different sign-in attempt")), -1);
   EXPECT_EQ(errors.at(0).indexOf(old_state), -1);
   EXPECT_EQ(errors.at(0).indexOf(new_state), -1);
   EXPECT_TRUE(oauth.authentication_pending());  // the current attempt is still waiting
@@ -873,6 +891,373 @@ TEST_F(OAuthCallbackTest, ACallbackCanOnlyBeUsedOnce) {
   WaitFor([this]() { return results.count() >= 2; }, 3000);
   for (const bool ok : std::as_const(results)) EXPECT_FALSE(ok);
   EXPECT_FALSE(oauth.authenticated());
+}
+
+// ------------------------------------------------------------------------------------------------- real authenticator behind a session
+
+#include <QTest>
+#include <QTcpServer>
+#include <QTcpSocket>
+
+#include "tidal/tidalaccount.h"
+
+namespace {
+
+// A token endpoint on localhost that counts what it is asked and can hold its answers, so interleavings can be driven exactly.
+class FakeTokenServer : public QObject {
+ public:
+  struct Answer {
+    int status = 200;
+    QByteArray body = R"({"token_type":"Bearer","access_token":"test-access","refresh_token":"test-refresh","expires_in":3600,"user":{"countryCode":"NO","userId":7}})";
+  };
+
+  FakeTokenServer() {
+    EXPECT_TRUE(server_.listen(QHostAddress::LocalHost));
+    QObject::connect(&server_, &QTcpServer::newConnection, this, [this]() {
+      while (QTcpSocket *socket = server_.nextPendingConnection()) {
+        socket->setParent(this);
+        QObject::connect(socket, &QTcpSocket::readyRead, this, [this, socket]() { Read(socket); });
+      }
+    });
+  }
+
+  QUrl url() const { return QUrl(QStringLiteral("http://127.0.0.1:%1/token").arg(server_.serverPort())); }
+
+  // Answers are used in order; the last one repeats.
+  void Queue(const Answer &answer) { answers_ << answer; }
+  void Release() {
+    const QList<QTcpSocket*> held = held_;
+    held_.clear();
+    for (QTcpSocket *socket : held) Respond(socket);
+  }
+
+  int requests = 0;
+  QStringList bodies;
+  bool hold = false;
+
+ private:
+  void Read(QTcpSocket *socket) {
+    QByteArray buffer = socket->property("buffer").toByteArray() + socket->readAll();
+    socket->setProperty("buffer", buffer);
+    const int header_end = static_cast<int>(buffer.indexOf("\r\n\r\n"));
+    if (header_end < 0 || socket->property("handled").toBool()) return;
+    int length = 0;
+    const QList<QByteArray> lines = buffer.left(header_end).split('\n');
+    for (const QByteArray &line : lines) {
+      if (line.toLower().startsWith("content-length:")) length = line.mid(15).trimmed().toInt();
+    }
+    if (buffer.size() < header_end + 4 + length) return;
+    socket->setProperty("handled", true);
+    ++requests;
+    bodies << QString::fromUtf8(buffer.mid(header_end + 4, length));
+    if (hold) held_ << socket;
+    else Respond(socket);
+  }
+
+  void Respond(QTcpSocket *socket) {
+    const Answer answer = answers_.isEmpty() ? Answer() : (answers_.count() > responded_ ? answers_.at(responded_) : answers_.last());
+    ++responded_;
+    socket->write(QByteArray("HTTP/1.1 ") + QByteArray::number(answer.status) + " X\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(answer.body.size()) + "\r\nConnection: close\r\n\r\n" + answer.body);
+    socket->disconnectFromHost();
+  }
+
+  QTcpServer server_;
+  QList<Answer> answers_;
+  QList<QTcpSocket*> held_;
+  int responded_ = 0;
+};
+
+// What TidalService does with its OAuthenticator, without the service: numbered interactive attempts only, the address only while starting.
+class OAuthAccount : public AccountBackend {
+ public:
+  explicit OAuthAccount(OAuthenticator *oauth, QObject *parent = nullptr) : AccountBackend(parent), oauth_(oauth) {
+    QObject::connect(oauth_, &OAuthenticator::InteractiveFinished, this, [this](const quint64 attempt, const bool success, const QString &error) { ReportFinished(attempt, success, error); });
+    QObject::connect(oauth_, &OAuthenticator::AuthorizationUrlReady, this, [this](const QUrl &url, const bool opened) { ReportLink(url, opened); });
+    QObject::connect(oauth_, &OAuthenticator::CallbackIgnored, this, [this](const QString &reason) { ignored << reason; });
+    QObject::connect(oauth_, &OAuthenticator::AuthenticationFinished, this, [this]() { ++legacy_finished; });
+  }
+  QString key() const override { return QStringLiteral("tidal"); }
+  QString service_name() const override { return QStringLiteral("Tidal"); }
+  bool authenticated() const override { return oauth_->authenticated(); }
+  bool configured() const override { return true; }
+  QString account_key() const override { return oauth_->authenticated() ? QString::number(oauth_->user_id()) : QString(); }
+  QList<SetupField> setup_fields() const override { return QList<SetupField>(); }
+  QString setup_help() const override { return QString(); }
+  QString signin_help() const override { return QString(); }
+  bool SaveSetup(const QMap<QString, QString> &, QString *) override { return true; }
+  void StartSignIn(const quint64 attempt) override {
+    BeginAttempt(attempt);
+    oauth_->Authenticate();
+    EndStart(oauth_->attempt());
+  }
+  void CancelSignIn() override {
+    ReleaseAttempt();
+    oauth_->CancelAuthentication();
+  }
+  void SignOut() override { oauth_->ClearSession(); }
+
+  QStringList ignored;
+  int legacy_finished = 0;
+
+ private:
+  OAuthenticator *oauth_;
+};
+
+class OAuthSessionTest : public ::testing::Test {
+ protected:
+  OAuthSessionTest() : network(std::make_shared<NetworkAccessManager>()), oauth(network), account(&oauth), session(&account) {
+    oauth.set_settings_group(QStringLiteral("adrift_oauth_session_test"));
+    oauth.set_type(OAuthenticator::Type::Authorization_Code);
+    oauth.set_authorize_url(QUrl(QStringLiteral("https://login.example.invalid/authorize")));
+    oauth.set_redirect_url(QUrl(QStringLiteral("tidal://login/auth")));
+    oauth.set_access_token_url(server.url());
+    oauth.set_client_id(QStringLiteral("test-client"));
+    oauth.set_scope(QStringLiteral("r_usr"));
+    oauth.set_use_local_redirect_server(false);
+    oauth.set_use_pkce(true);
+    QObject::connect(&session, &AccountSession::SignInFinished, &session, [this](const bool success, const QString &message, const bool cancelled) {
+      outcomes << (cancelled ? QStringLiteral("cancelled") : (success ? QStringLiteral("ok") : QStringLiteral("failed: ") + message));
+    });
+  }
+
+  QUrl Callback(const QString &state, const QString &extra = QStringLiteral("code=abc")) const {
+    return QUrl(QStringLiteral("tidal://login/auth?%1&state=%2").arg(extra, state));
+  }
+  void Deliver(const QString &state, const QString &extra = QStringLiteral("code=abc")) { oauth.ExternalAuthorizationUrlReceived(Callback(state, extra)); }
+
+  FakeTokenServer server;
+  SharedPtr<NetworkAccessManager> network;
+  OAuthenticator oauth;
+  OAuthAccount account;
+  AccountSession session;
+  UrlCatcher catcher{ QStringLiteral("https") };
+  QStringList outcomes;
+};
+
+}  // namespace
+
+TEST_F(OAuthSessionTest, AStaleCallbackOfACancelledAttemptNeverCancelsTheNewOne) {
+
+  session.SignIn();
+  const QString state_a = catcher.State();
+  session.Cancel();
+  session.SignIn();
+  const QString state_b = catcher.State();
+  ASSERT_NE(state_a, state_b);
+  ASSERT_EQ(QStringList() << QStringLiteral("cancelled"), outcomes);
+
+  // The browser of attempt A answers late. B is still waiting.
+  Deliver(state_a);
+  Deliver(state_a, QStringLiteral("error=access_denied"));
+  EXPECT_EQ(AccountSession::State::SigningIn, session.state());
+  EXPECT_TRUE(oauth.authentication_pending());
+  EXPECT_EQ(QStringList() << QStringLiteral("cancelled"), outcomes);
+  EXPECT_EQ(0, server.requests);
+  EXPECT_EQ(2, account.ignored.count());
+
+  // B's own callback still works.
+  Deliver(state_b);
+  WaitFor([this]() { return session.state() == AccountSession::State::SignedIn; }, 5000);
+  EXPECT_EQ(AccountSession::State::SignedIn, session.state());
+  EXPECT_EQ((QStringList() << QStringLiteral("cancelled") << QStringLiteral("ok")), outcomes);
+  EXPECT_EQ(1, server.requests);
+
+}
+
+TEST_F(OAuthSessionTest, CallbacksThatCannotBeAttributedAreIgnoredEvenWhenTheyCarryAProviderError) {
+
+  session.SignIn();
+  const QString state = catcher.State();
+
+  oauth.ExternalAuthorizationUrlReceived(QUrl(QStringLiteral("tidal://login/auth?code=abc&state=wrong")));
+  oauth.ExternalAuthorizationUrlReceived(QUrl(QStringLiteral("tidal://login/auth?code=abc&state=")));
+  oauth.ExternalAuthorizationUrlReceived(QUrl(QStringLiteral("tidal://login/auth?code=abc")));
+  oauth.ExternalAuthorizationUrlReceived(QUrl(QStringLiteral("tidal://login/auth?error=access_denied&state=wrong")));
+  oauth.ExternalAuthorizationUrlReceived(QUrl(QStringLiteral("tidal://login/auth?error=server_error&error_description=boom")));
+  oauth.ExternalAuthorizationUrlReceived(QUrl(QStringLiteral("tidal://login/auth")));
+  EXPECT_EQ(6, account.ignored.count());
+  // Nothing was echoed: not the expected state, not the one the reply sent.
+  for (const QString &reason : std::as_const(account.ignored)) {
+    EXPECT_EQ(-1, reason.indexOf(state));
+    EXPECT_EQ(-1, reason.indexOf(QStringLiteral("wrong")));
+  }
+  EXPECT_EQ(AccountSession::State::SigningIn, session.state());
+  EXPECT_TRUE(outcomes.isEmpty());
+  EXPECT_EQ(0, server.requests);
+  EXPECT_EQ(0, account.legacy_finished);  // ignoring is not a sign-in result for anybody
+
+  // A provider error that carries the right state is the answer to this sign-in: it ends it, with the provider's reason.
+  Deliver(state, QStringLiteral("error=access_denied&error_description=The%20user%20said%20no"));
+  EXPECT_EQ(AccountSession::State::SignedOut, session.state());
+  ASSERT_EQ(1, outcomes.count());
+  EXPECT_EQ(QStringLiteral("failed: The user said no"), outcomes.at(0));
+  EXPECT_EQ(0, server.requests);
+
+}
+
+TEST_F(OAuthSessionTest, ARepeatedCallbackProducesOnlyOneExchangeAndDoesNotFailIt) {
+
+  server.hold = true;
+  session.SignIn();
+  const QString state = catcher.State();
+  Deliver(state);
+  WaitFor([this]() { return server.requests == 1; }, 5000);
+  ASSERT_EQ(1, server.requests);
+
+  // The browser (or a second desktop activation) repeats the callback while the code is being exchanged.
+  Deliver(state);
+  Deliver(state);
+  QCoreApplication::processEvents();
+  EXPECT_EQ(AccountSession::State::SigningIn, session.state());
+  EXPECT_TRUE(outcomes.isEmpty());
+  EXPECT_EQ(1, server.requests);
+  EXPECT_EQ(2, account.ignored.count());
+
+  server.hold = false;
+  server.Release();
+  WaitFor([this]() { return session.state() == AccountSession::State::SignedIn; }, 5000);
+  EXPECT_EQ(AccountSession::State::SignedIn, session.state());
+  EXPECT_EQ(QStringList() << QStringLiteral("ok"), outcomes);
+  EXPECT_EQ(1, server.requests);
+
+}
+
+TEST_F(OAuthSessionTest, CancellingDuringTheTokenExchangeStoresNoSession) {
+
+  server.hold = true;
+  session.SignIn();
+  Deliver(catcher.State());
+  WaitFor([this]() { return server.requests == 1; }, 5000);
+  ASSERT_EQ(1, server.requests);
+
+  session.Cancel();
+  EXPECT_EQ(AccountSession::State::SignedOut, session.state());
+  // The service answers anyway; nobody is listening for it any more.
+  server.hold = false;
+  server.Release();
+  QTest::qWait(150);
+  EXPECT_FALSE(oauth.authenticated());
+  EXPECT_EQ(AccountSession::State::SignedOut, session.state());
+  EXPECT_EQ(QStringList() << QStringLiteral("cancelled"), outcomes);
+
+}
+
+TEST_F(OAuthSessionTest, ANewAttemptAbandonsTheExchangeOfTheEarlierOne) {
+
+  server.hold = true;
+  session.SignIn();
+  Deliver(catcher.State());
+  WaitFor([this]() { return server.requests == 1; }, 5000);
+  session.Cancel();
+  session.SignIn();  // B
+  ASSERT_EQ(AccountSession::State::SigningIn, session.state());
+
+  server.hold = false;
+  server.Release();  // A's answer, late
+  QTest::qWait(150);
+  EXPECT_EQ(AccountSession::State::SigningIn, session.state());
+  EXPECT_FALSE(oauth.authenticated());
+  EXPECT_EQ(QStringList() << QStringLiteral("cancelled"), outcomes);
+
+}
+
+TEST_F(OAuthSessionTest, ABackgroundRefreshNeverCompletesOrFailsAManualReconnect) {
+
+  // First a normal sign-in, which leaves a session with a refresh token.
+  session.SignIn();
+  Deliver(catcher.State());
+  WaitFor([this]() { return session.state() == AccountSession::State::SignedIn; }, 5000);
+  ASSERT_EQ(AccountSession::State::SignedIn, session.state());
+  ASSERT_EQ(1, server.requests);
+
+  // The user starts a manual reconnect and the browser has not answered yet.
+  session.SignIn();
+  ASSERT_EQ(AccountSession::State::SigningIn, session.state());
+  const QString state = catcher.State();
+  outcomes.clear();
+
+  // Meanwhile a background refresh succeeds. The service holds a session and reports AuthenticationFinished(true), but that is not this sign-in.
+  const int legacy_before = account.legacy_finished;
+  ASSERT_TRUE(oauth.RefreshAccessToken());
+  WaitFor([this]() { return server.requests == 2; }, 5000);
+  WaitFor([this, legacy_before]() { return account.legacy_finished > legacy_before; }, 5000);
+  EXPECT_GT(account.legacy_finished, legacy_before);
+  EXPECT_TRUE(oauth.authenticated());
+  EXPECT_EQ(AccountSession::State::SigningIn, session.state());
+  EXPECT_TRUE(outcomes.isEmpty());
+
+  // A refresh that the service refuses for good clears the stored session and reports a failure to legacy listeners, but it is not a failed sign-in either.
+  FakeTokenServer::Answer refused;
+  refused.status = 400;
+  refused.body = R"({"error":"invalid_grant","error_description":"expired"})";
+  server.Queue(FakeTokenServer::Answer());
+  server.Queue(FakeTokenServer::Answer());
+  server.Queue(refused);
+  server.Queue(FakeTokenServer::Answer());  // and the answer to the reconnect's own code exchange
+  ASSERT_TRUE(oauth.RefreshAccessToken());
+  WaitFor([this]() { return server.requests == 3; }, 5000);
+  QTest::qWait(150);
+  EXPECT_EQ(AccountSession::State::SigningIn, session.state());
+  EXPECT_TRUE(outcomes.isEmpty());
+
+  // The browser finally answers the reconnect: that completes it.
+  Deliver(state);
+  WaitFor([this]() { return !outcomes.isEmpty(); }, 5000);
+  ASSERT_EQ(1, outcomes.count());
+  EXPECT_EQ(QStringLiteral("ok"), outcomes.at(0));
+
+}
+
+TEST_F(OAuthSessionTest, TheBrowserAddressIsAnnouncedForTheAttemptThatStartedIt) {
+
+  QSignalSpy link(&session, &AccountSession::LinkChanged);
+  session.SignIn();
+  EXPECT_EQ(catcher.urls.last(), session.link());
+  EXPECT_TRUE(session.link_opened());
+  EXPECT_GE(link.count(), 1);
+  session.Cancel();
+  EXPECT_TRUE(session.link().isEmpty());
+
+}
+
+TEST(OAuthLegacyConsumerTest, AConsumerThatDoesNotKnowAboutAttemptsStillSeesAFailureForABadCallback) {
+
+  // Spotify, ListenBrainz and the others listen to AuthenticationFinished only. They keep the visible failure they always had.
+  SharedPtr<NetworkAccessManager> network = std::make_shared<NetworkAccessManager>();
+  OAuthenticator oauth(network);
+  oauth.set_settings_group(QStringLiteral("adrift_oauth_legacy_test"));
+  oauth.set_type(OAuthenticator::Type::Authorization_Code);
+  oauth.set_authorize_url(QUrl(QStringLiteral("https://login.example.invalid/authorize")));
+  oauth.set_redirect_url(QUrl(QStringLiteral("app://cb")));
+  oauth.set_access_token_url(QUrl(QStringLiteral("http://127.0.0.1:1/token")));
+  oauth.set_client_id(QStringLiteral("c"));
+  oauth.set_use_local_redirect_server(false);
+  UrlCatcher catcher(QStringLiteral("https"));
+  QStringList errors;
+  QObject::connect(&oauth, &OAuthenticator::AuthenticationFinished, &oauth, [&errors](const bool success, const QString &error, const bool) {
+    if (!success) errors << error;
+  });
+  oauth.Authenticate();
+  oauth.ExternalAuthorizationUrlReceived(QUrl(QStringLiteral("app://cb?code=x&state=nope")));
+  ASSERT_EQ(1, errors.count());
+  EXPECT_FALSE(errors.at(0).isEmpty());
+  // And with a browser address handler nobody connected, the modal fallback is what shows the address: nothing is emitted for it.
+  EXPECT_EQ(1, catcher.urls.count());
+
+}
+
+TEST(TidalAccountTextTest, SetupGuidanceIsTruthfulAboutTheCompatibleClient) {
+
+  const QString help = TidalAccount::SetupHelpText();
+  // It says what this integration is and that dashboard client IDs do not work with it.
+  EXPECT_NE(-1, help.indexOf(QStringLiteral("not compatible")));
+  EXPECT_NE(-1, help.indexOf(QStringLiteral("older")));
+  EXPECT_NE(-1, help.indexOf(QStringLiteral("works with Strawberry")));
+  // It never sends the user down the registration path that does not work, and never offers to take credentials from other apps.
+  EXPECT_EQ(-1, help.indexOf(QStringLiteral("Create an app")));
+  EXPECT_EQ(-1, help.indexOf(QStringLiteral("add exactly this redirect")));
+  EXPECT_NE(-1, help.indexOf(QStringLiteral("does not take one from other apps")));
+
 }
 
 // ------------------------------------------------------------------------------------------------------------------ renders
@@ -1001,7 +1386,7 @@ TEST_F(StreamingImportRenderTest, WaitingForTheBrowser) {
 TEST_F(StreamingImportRenderTest, BrowserCouldNotBeOpened) {
   RenderAll(QStringLiteral("4-browser-address"), [](StreamingImportView &view, FakeAccount &account, FakeSource &) {
     view.account_button()->click();
-    Q_EMIT account.LinkReady(QUrl(QStringLiteral("https://login.example.invalid/authorize?client_id=example&state=abc")), false);
+    Q_EMIT account.LinkReady(account.last_attempt, QUrl(QStringLiteral("https://login.example.invalid/authorize?client_id=example&state=abc")), false);
   });
 }
 
@@ -1074,6 +1459,220 @@ TEST_F(StreamingImportRenderTest, RateLimited) {
 
 TEST_F(StreamingImportRenderTest, ImportedSuccess) {
   RenderAll(QStringLiteral("11-imported"), [](StreamingImportView &view, FakeAccount &account, FakeSource &) {
+    account.signed_in = true;
+    view.session(QStringLiteral("tidal"))->Refresh();
+    view.Activate();
+    WaitFor([&view]() { return view.current_page() == StreamingImportView::PageList; });
+    view.playlist_list()->setCurrentRow(0);
+    view.playlist_list()->item(0)->setSelected(true);
+    QObject::connect(&view, &StreamingImportView::SnapshotReady, &view, [&view](const QString &, const QString &, const QString &name, const SongList &songs, const int skipped) {
+      view.ShowImported(name, false, static_cast<int>(songs.count()), skipped);
+    });
+    view.import_button()->click();
+    WaitFor([&view]() { return view.status_label()->text().contains(QStringLiteral("Imported")); });
+  });
+}
+
+// ------------------------------------------------------------------------------------------------- the combined shell
+
+#include "listeningroom/coverartwidget.h"
+#include "listeningroom/libraryparts.h"
+#include "listeningroom/libraryview.h"
+#include "listeningroom/listeningroom.h"
+#include "listeningroom/roommotion.h"
+#include "listeningroom/transportbar.h"
+#include "library_fixture.h"
+#include "listeningroom_fixture.h"
+
+// The production ListeningRoom with the production Library (synthetic collection) AND the production StreamingImportView hosted on its Streaming page,
+// rendered together at wide and compact sizes. This is the shell as MainWindow assembles it, without the classic window.
+class CombinedShellRenderTest : public StreamingImportRenderTest {
+ protected:
+  void RenderShell(const QString &theme, const QString &size_name, const QSize &size, const QString &state, const ListeningRoom::View page, const Arrange &arrange) {
+
+    QObject holder;
+    FakeAccount *account = new FakeAccount(&holder);
+    FakeSource *source = new FakeSource;
+    source->setParent(&holder);
+    source->responder = HappyPath;
+    FakeSource *other_source = new FakeSource;
+    other_source->setParent(&holder);
+    other_source->responder = HappyPath;
+
+    RoomFixture::QueueFixture queue(14);
+    FakeLibrarySource library(36);
+    ListeningRoom room;
+    if (theme == QLatin1String("adrift-dark")) room.setPalette(ThemePalette::BuildPalette(QApplication::style()->standardPalette(), ThemePalette::AdriftDarkColors()));
+
+    StreamingImportView *view = new StreamingImportView;
+    StreamingImportView::ServiceEntry tidal;
+    tidal.name = QStringLiteral("Tidal");
+    tidal.url_scheme = QStringLiteral("tidal");
+    tidal.song_source = Song::Source::Tidal;
+    tidal.page_source = source;
+    tidal.account = account;
+    view->AddService(tidal);
+    StreamingImportView::ServiceEntry qobuz;
+    qobuz.name = QStringLiteral("Qobuz");
+    qobuz.url_scheme = QStringLiteral("qobuz");
+    qobuz.song_source = Song::Source::Qobuz;
+    qobuz.page_source = other_source;
+    qobuz.account = new FakeQobuzAccount(&holder);
+    view->AddService(qobuz);
+    view->SelectService(QStringLiteral("tidal"));
+
+    RoomServiceCard tidal_card;
+    tidal_card.key = QStringLiteral("tidal");
+    tidal_card.name = QStringLiteral("Tidal");
+    RoomServiceCard qobuz_card;
+    qobuz_card.key = QStringLiteral("qobuz");
+    qobuz_card.name = QStringLiteral("Qobuz");
+    room.SetStreamingServices({ tidal_card, qobuz_card });
+    room.SetStreamingWidget(view);
+    room.library()->SetSource(&library);
+
+    RoomTrack track;
+    track.title = QStringLiteral("A Quiet Engine");
+    track.artist = QStringLiteral("The Paper Lanterns");
+    track.album = QStringLiteral("Night Ferry");
+    room.SetQueuePlaylist(queue.playlist(), QStringLiteral("Evening Drift"));
+    queue.SetCurrent(3);
+    room.SetVolume(62);
+    room.SetPlaybackState(TransportBar::State::Playing);
+    room.SetNowPlaying(track);
+    room.SetCover(RoomFixture::Cover(0));
+    room.SetCanSeek(true);
+    room.SetPosition(94000, 281000);
+
+    room.resize(size);
+    room.show();
+    room.SetView(page);
+    Pump();
+    if (page == ListeningRoom::View::Library) {
+      QSignalSpy settled(room.library(), &LibraryView::AlbumsSettled);
+      if (!room.library()->loaded()) settled.wait(5000);
+    }
+    arrange(*view, *account, *source);
+    Pump();
+
+    // Settled: the indicator and the record are at rest and the covers on screen have arrived.
+    for (int i = 0; i < 300; ++i) {
+      QCoreApplication::processEvents();
+      const bool rest = !room.nav_indicator_gliding() && !room.cover()->fading() && !room.cover()->settle_pending() && (room.cover()->record_amount() == 0.0 || room.cover()->record_amount() == 1.0) && room.library()->album_model()->in_flight() == 0;
+      if (rest && i > 4) {
+        QTest::qWait(40);
+        if (room.library()->album_model()->in_flight() == 0) break;
+      }
+      QTest::qWait(10);
+    }
+    if (QWidget *focused = QApplication::focusWidget()) focused->clearFocus();
+    QCoreApplication::processEvents();
+
+    EXPECT_EQ(size, room.size()) << state.toStdString() << " " << size_name.toStdString();
+    EXPECT_TRUE(FitsHorizontally(*view)) << state.toStdString() << " " << size_name.toStdString();
+    // One shell: one transport, and the Streaming page is the hosted widget.
+    int transports = 0;
+    for (TransportBar *bar : room.findChildren<TransportBar*>()) transports += bar->isVisible() ? 1 : 0;
+    EXPECT_EQ(1, transports);
+    if (page == ListeningRoom::View::Streaming) {
+      EXPECT_EQ(view, room.streaming_widget());
+      EXPECT_TRUE(view->isVisible());
+      EXPECT_TRUE(room.page(ListeningRoom::View::Streaming)->isAncestorOf(view));
+    }
+    const QImage image = room.grab().toImage();
+    EXPECT_TRUE(NotBlank(image)) << state.toStdString();
+    SaveRender(image, QStringLiteral("combined-%1-%2-%3").arg(state, size_name, theme));
+
+  }
+
+  void RenderStreamingStates(const QString &state, const Arrange &arrange) {
+    for (const QString &theme : { QStringLiteral("adrift-dark"), QStringLiteral("system") }) {
+      RenderShell(theme, QStringLiteral("wide"), QSize(1440, 900), state, ListeningRoom::View::Streaming, arrange);
+      RenderShell(theme, QStringLiteral("compact"), QSize(1000, 700), state, ListeningRoom::View::Streaming, arrange);
+    }
+  }
+};
+
+TEST_F(CombinedShellRenderTest, LibraryPopulatedInTheCombinedShell) {
+  for (const QString &theme : { QStringLiteral("adrift-dark"), QStringLiteral("system") }) {
+    RenderShell(theme, QStringLiteral("wide"), QSize(1440, 900), QStringLiteral("library"), ListeningRoom::View::Library, [](StreamingImportView &, FakeAccount &, FakeSource &) {});
+    RenderShell(theme, QStringLiteral("compact"), QSize(1000, 700), QStringLiteral("library"), ListeningRoom::View::Library, [](StreamingImportView &, FakeAccount &, FakeSource &) {});
+  }
+}
+
+TEST_F(CombinedShellRenderTest, StreamingNotSignedIn) {
+  RenderStreamingStates(QStringLiteral("streaming-1-not-signed-in"), [](StreamingImportView &, FakeAccount &, FakeSource &) {});
+}
+
+TEST_F(CombinedShellRenderTest, StreamingSetupNeeded) {
+  RenderStreamingStates(QStringLiteral("streaming-2-setup-needed"), [](StreamingImportView &view, FakeAccount &account, FakeSource &) {
+    account.is_configured = false;
+    view.session(QStringLiteral("tidal"))->Refresh();
+  });
+}
+
+TEST_F(CombinedShellRenderTest, StreamingSetupNeededWithTheRealTidalGuidance) {
+  RenderStreamingStates(QStringLiteral("streaming-2b-setup-tidal-text"), [](StreamingImportView &view, FakeAccount &account, FakeSource &) {
+    account.is_configured = false;
+    account.help_text = TidalAccount::SetupHelpText();
+    view.session(QStringLiteral("tidal"))->Refresh();
+  });
+}
+
+TEST_F(CombinedShellRenderTest, StreamingWaitingForTheBrowserAndAddress) {
+  RenderStreamingStates(QStringLiteral("streaming-3-waiting-browser"), [](StreamingImportView &view, FakeAccount &account, FakeSource &) {
+    view.account_button()->click();
+    Q_EMIT account.LinkReady(account.last_attempt, QUrl(QStringLiteral("https://login.example.invalid/authorize?client_id=example&state=abc")), false);
+  });
+}
+
+TEST_F(CombinedShellRenderTest, StreamingPlaylistList) {
+  RenderStreamingStates(QStringLiteral("streaming-4-list"), [](StreamingImportView &view, FakeAccount &account, FakeSource &) {
+    account.signed_in = true;
+    view.session(QStringLiteral("tidal"))->Refresh();
+    view.Activate();
+    WaitFor([&view]() { return view.current_page() == StreamingImportView::PageList; });
+    view.playlist_list()->setCurrentRow(1);
+    view.playlist_list()->item(1)->setSelected(true);
+  });
+}
+
+TEST_F(CombinedShellRenderTest, StreamingExpiredSession) {
+  RenderStreamingStates(QStringLiteral("streaming-5-expired"), [](StreamingImportView &view, FakeAccount &account, FakeSource &source) {
+    source.responder = [](const bool, const QString &, const int) { return Http(401); };
+    account.signed_in = true;
+    view.session(QStringLiteral("tidal"))->Refresh();
+    view.Activate();
+    WaitFor([&view]() { return view.banner()->isVisible(); });
+    view.banner_details_toggle()->click();
+  });
+}
+
+TEST_F(CombinedShellRenderTest, StreamingOfflineStaleListAndRateLimit) {
+  RenderStreamingStates(QStringLiteral("streaming-6-offline-stale"), [](StreamingImportView &view, FakeAccount &account, FakeSource &source) {
+    account.signed_in = true;
+    view.session(QStringLiteral("tidal"))->Refresh();
+    view.Activate();
+    WaitFor([&view]() { return view.current_page() == StreamingImportView::PageList; });
+    source.responder = [](const bool, const QString &, const int) { return Net(QNetworkReply::HostNotFoundError); };
+    view.reload_button()->click();
+    WaitFor([&view]() { return view.banner()->isVisible(); });
+  });
+  RenderStreamingStates(QStringLiteral("streaming-7-rate-limited"), [](StreamingImportView &view, FakeAccount &account, FakeSource &source) {
+    source.responder = [](const bool, const QString &, const int) {
+      PageResult result = Http(429);
+      result.retry_after_sec = 45;
+      return result;
+    };
+    account.signed_in = true;
+    view.session(QStringLiteral("tidal"))->Refresh();
+    view.Activate();
+    WaitFor([&view]() { return view.banner()->isVisible(); });
+  });
+}
+
+TEST_F(CombinedShellRenderTest, StreamingImported) {
+  RenderStreamingStates(QStringLiteral("streaming-8-imported"), [](StreamingImportView &view, FakeAccount &account, FakeSource &) {
     account.signed_in = true;
     view.session(QStringLiteral("tidal"))->Refresh();
     view.Activate();

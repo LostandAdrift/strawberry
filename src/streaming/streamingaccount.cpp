@@ -28,6 +28,40 @@
 
 using namespace Qt::Literals::StringLiterals;
 
+void AccountBackend::BeginAttempt(const quint64 session_attempt) {
+  session_attempt_ = session_attempt;
+  service_attempt_ = 0;
+  starting_ = true;
+}
+
+void AccountBackend::EndStart(const quint64 service_attempt) {
+  starting_ = false;
+  // If the attempt already ended (and was released) while it was being started, there is nothing to remember.
+  if (session_attempt_ != 0) service_attempt_ = service_attempt;
+}
+
+void AccountBackend::ReleaseAttempt() {
+  session_attempt_ = 0;
+  service_attempt_ = 0;
+}
+
+bool AccountBackend::OwnsServiceAttempt(const quint64 service_attempt) const {
+  return session_attempt_ != 0 && (starting_ || service_attempt == service_attempt_);
+}
+
+void AccountBackend::ReportFinished(const quint64 service_attempt, const bool success, const QString &error) {
+
+  if (!OwnsServiceAttempt(service_attempt)) return;
+  const quint64 session_attempt = session_attempt_;
+  if (success) Q_EMIT SignInSucceeded(session_attempt);
+  else Q_EMIT SignInFailed(session_attempt, error);
+
+}
+
+void AccountBackend::ReportLink(const QUrl &url, const bool opened) {
+  if (starting_ && session_attempt_ != 0) Q_EMIT LinkReady(session_attempt_, url, opened);
+}
+
 AccountSession::AccountSession(AccountBackend *backend, QObject *parent, const int timeout_ms)
     : QObject(parent),
       backend_(backend),
@@ -92,8 +126,8 @@ void AccountSession::SignIn() {
   timed_out_ = false;
   SetState(State::SigningIn);
   timer_->start();
-  // The backend may report right away (for example when it can't even start); that report is handled like any other.
-  backend_->StartSignIn();
+  // The backend may report right away (for example when it can't even start); that report carries this attempt's number and is handled like any other.
+  backend_->StartSignIn(static_cast<quint64>(attempt_));
 
 }
 
@@ -117,10 +151,11 @@ void AccountSession::SignOut() {
 
 }
 
-void AccountSession::BackendSucceeded() {
+void AccountSession::BackendSucceeded(const quint64 attempt) {
 
-  if (state_ != State::SigningIn) {
-    // Not part of a sign-in of ours, for example a background token refresh. Only the state is brought up to date.
+  // Only the attempt that is waiting counts. A success that belongs to an attempt that was cancelled, timed out or replaced, or that is not an interactive
+  // attempt at all, never completes the sign-in that is running now.
+  if (state_ != State::SigningIn || attempt != static_cast<quint64>(attempt_)) {
     Refresh();
     return;
   }
@@ -135,10 +170,10 @@ void AccountSession::BackendSucceeded() {
 
 }
 
-void AccountSession::BackendFailed(const QString &message) {
+void AccountSession::BackendFailed(const quint64 attempt, const QString &message) {
 
-  // A failure that is not about a sign-in of ours (stale callback, background refresh) must not show up as a new failure.
-  if (state_ != State::SigningIn) return;
+  // A failure that is not about the sign-in that is waiting (stale callback, earlier attempt, background refresh) must not end it or show up as a failure.
+  if (state_ != State::SigningIn || attempt != static_cast<quint64>(attempt_)) return;
 
   EndAttempt();
   backend_->CancelSignIn();
@@ -147,9 +182,9 @@ void AccountSession::BackendFailed(const QString &message) {
 
 }
 
-void AccountSession::BackendLink(const QUrl &url, const bool opened) {
+void AccountSession::BackendLink(const quint64 attempt, const QUrl &url, const bool opened) {
 
-  if (state_ != State::SigningIn) return;
+  if (state_ != State::SigningIn || attempt != static_cast<quint64>(attempt_)) return;
   link_ = url;
   link_opened_ = opened;
   Q_EMIT LinkChanged();

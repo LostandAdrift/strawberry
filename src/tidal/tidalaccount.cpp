@@ -31,10 +31,9 @@ TidalAccount::TidalAccount(TidalService *service, QObject *parent)
     : AccountBackend(parent),
       service_(service) {
 
-  // Both end in AuthenticationFinished(); the account session ignores whatever does not belong to a sign-in it started.
-  QObject::connect(service_, &StreamingService::LoginSuccess, this, &AccountBackend::SignInSucceeded);
-  QObject::connect(service_, &StreamingService::LoginFailure, this, &AccountBackend::SignInFailed);
-  QObject::connect(service_, &TidalService::AuthorizationLinkReady, this, &AccountBackend::LinkReady);
+  // Not LoginSuccess/LoginFailure: those also report background token refreshes. InteractiveLoginFinished is the outcome of one numbered sign-in attempt.
+  QObject::connect(service_, &TidalService::InteractiveLoginFinished, this, [this](const quint64 attempt, const bool success, const QString &error) { ReportFinished(attempt, success, error); });
+  QObject::connect(service_, &TidalService::AuthorizationLinkReady, this, [this](const QUrl &url, const bool opened) { ReportLink(url, opened); });
   QObject::connect(service_, &TidalService::SessionChanged, this, &AccountBackend::SessionChanged);
 
 }
@@ -61,11 +60,19 @@ QList<AccountBackend::SetupField> TidalAccount::setup_fields() const {
 
 }
 
-QString TidalAccount::setup_help() const {
+QString TidalAccount::setup_help() const { return SetupHelpText(); }
 
-  return tr("Tidal only lets apps sign in with a client ID, and Adrift does not ship one. Create an app in the Tidal developer portal (developer.tidal.com), "
-            "add exactly this redirect address to it: tidal://login/auth, and paste the app's client ID below. "
-            "The client ID is not a secret. Whether Tidal accepts a desktop app with that redirect address is decided by Tidal, not by Adrift.");
+QString TidalAccount::SetupHelpText() {
+
+  // What this backend really is (checked against the code: legacy scopes "r_usr w_usr", token endpoint login.tidal.com/oauth2/token, API api.tidalhifi.com/v1,
+  // redirect tidal://login/auth). Tidal's current developer dashboard issues IDs for a different sign-in (login.tidal.com/authorize + auth.tidal.com/v1 token
+  // endpoint, PKCE, newer scopes), and the Strawberry maintainer states that those dashboard client IDs are not compatible with this integration.
+  return tr("Adrift signs in to Tidal the way Strawberry's Tidal support always has, with Tidal's older sign-in and older API. "
+            "Client IDs created in Tidal's public developer dashboard use Tidal's newer sign-in and are not compatible with it, so creating an app there will not make this work. "
+            "Adrift does not include a client ID and does not take one from other apps. "
+            "\n\nIf you already have a client ID that works with Strawberry's Tidal support, paste it below; it is kept exactly as you enter it and is not a secret. "
+            "Without one, Tidal sign-in is not available in Adrift yet. Qobuz and your own music are not affected. "
+            "Playlists through Tidal's newer official API would need a separate sign-in that Adrift does not have.");
 
 }
 
@@ -93,8 +100,19 @@ bool TidalAccount::SaveSetup(const QMap<QString, QString> &values, QString *erro
 
 }
 
-void TidalAccount::StartSignIn() { service_->StartAuthorization(service_->client_id()); }
+void TidalAccount::StartSignIn(const quint64 attempt) {
 
-void TidalAccount::CancelSignIn() { service_->CancelAuthorization(); }
+  BeginAttempt(attempt);
+  // The service may report at once (no client ID, redirect error): that is about this attempt and is passed on while it is being started.
+  EndStart(service_->StartAuthorization(service_->client_id()));
+
+}
+
+void TidalAccount::CancelSignIn() {
+
+  ReleaseAttempt();
+  service_->CancelAuthorization();
+
+}
 
 void TidalAccount::SignOut() { service_->ClearSession(); }

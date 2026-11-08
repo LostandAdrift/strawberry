@@ -125,9 +125,12 @@ class TidalService : public StreamingService {
   void SessionChanged();
   // The browser address for the sign-in in progress. `opened` is false when the desktop could not start a browser.
   void AuthorizationLinkReady(const QUrl &url, const bool opened);
+  // The outcome of one interactive sign-in attempt (the number StartAuthorization() returned), and only of that: a background token refresh never emits it.
+  void InteractiveLoginFinished(const quint64 attempt, const bool success, const QString &error);
 
  public Q_SLOTS:
-  void StartAuthorization(const QString &client_id);
+  // Returns the number of the interactive attempt it started. Its outcome is reported by InteractiveLoginFinished with that number.
+  quint64 StartAuthorization(const QString &client_id);
   void AuthorizationUrlReceived(const QUrl &url);
   void GetArtists() override;
   void GetAlbums() override;

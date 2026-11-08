@@ -40,10 +40,12 @@ class TidalAccount : public AccountBackend {
   QString account_key() const override;
   QList<SetupField> setup_fields() const override;
   QString setup_help() const override;
+  // The setup text without needing a service (used by tests).
+  static QString SetupHelpText();
   QString signin_help() const override;
   QUrl pending_url() const override;
   bool SaveSetup(const QMap<QString, QString> &values, QString *error) override;
-  void StartSignIn() override;
+  void StartSignIn(const quint64 attempt) override;
   void CancelSignIn() override;
   void SignOut() override;
 

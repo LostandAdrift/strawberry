@@ -103,6 +103,12 @@ class LibraryView : public QWidget {
   int artist_count() const;
   bool loaded() const { return loaded_; }
 
+  // The host started reading a music folder (or found it was already part of the library). The page says so until albums arrive, instead of looking broken
+  // while the scan has not found anything yet.
+  void NoteMusicAdded(const QString &folder);
+  void NoteFolderAlreadyAdded(const QString &folder);
+  QString adding_folder() const { return adding_folder_; }
+
   void OpenAlbum(const LibraryAlbum &album);
   void CloseAlbum();
   const LibraryAlbum &current_album() const { return current_album_; }
@@ -177,6 +183,9 @@ class LibraryView : public QWidget {
   bool loading_ = false;
   bool first_load_started_ = false;
   bool destroying_ = false;
+  QString adding_folder_;
+  QString already_added_folder_;
+  QTimer *adding_timer_ = nullptr;
 
   LibraryAlbumList all_;
   LibraryAlbumList remote_matches_;  // albums found by the source for the current text (track matches)

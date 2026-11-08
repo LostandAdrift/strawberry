@@ -24,6 +24,7 @@
 #include <QCoreApplication>
 #include <QImage>
 #include <QMetaObject>
+#include <QPointer>
 #include <QSize>
 #include <QThread>
 #include <QString>
@@ -79,7 +80,10 @@ LibraryAlbumList CollectionLibrarySource::LoadAlbums(const QString &filter_text)
   CollectionFilterOptions options;
   if (!filter_text.trimmed().isEmpty()) options.set_filter_text(filter_text.trimmed());
 
-  const CollectionBackend::AlbumList list = OnBackendThread(backend_, [this, &options]() { return backend_->GetAllAlbums(options); });
+  // The lambda holds the backend by guarded pointer, not this source: if the source or the backend goes away while the read waits for the backend's thread,
+  // nothing dangling is touched.
+  const QPointer<CollectionBackend> backend = backend_;
+  const CollectionBackend::AlbumList list = OnBackendThread(backend_, [backend, &options]() { return backend ? backend->GetAllAlbums(options) : CollectionBackend::AlbumList(); });
   albums.reserve(list.count());
   for (const CollectionBackend::Album &item : list) {
     LibraryAlbum album;
@@ -99,7 +103,8 @@ LibraryAlbumList CollectionLibrarySource::LoadAlbums(const QString &filter_text)
 SongList CollectionLibrarySource::LoadTracks(const LibraryAlbum &album) {
 
   if (!backend_) return SongList();
-  SongList songs = OnBackendThread(backend_, [this, &album]() { return album.artist.isEmpty() ? backend_->GetCompilationSongs(album.album) : backend_->GetAlbumSongs(album.artist, album.album); });
+  const QPointer<CollectionBackend> backend = backend_;
+  SongList songs = OnBackendThread(backend_, [backend, &album]() { return !backend ? SongList() : (album.artist.isEmpty() ? backend->GetCompilationSongs(album.album) : backend->GetAlbumSongs(album.artist, album.album)); });
   // Disc, then track number: the order of the record, whatever order the database returned.
   std::stable_sort(songs.begin(), songs.end(), [](const Song &a, const Song &b) {
     if (a.disc() != b.disc()) return a.disc() < b.disc();

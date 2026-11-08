@@ -54,6 +54,14 @@ RoomButton::RoomButton(const QString &text, const bool primary, QWidget *parent)
 
 }
 
+void RoomButton::SetPrimary(const bool primary) {
+
+  if (primary_ == primary) return;
+  primary_ = primary;
+  update();
+
+}
+
 double RoomButton::hover_amount() const {
   return hover_->value();
 }
@@ -133,6 +141,12 @@ void RoomButton::paintEvent(QPaintEvent *e) {
     p.setBrush(fill);
     p.drawRoundedRect(r, radius, radius);
     ink = RoomStyle::AccentText(pal);
+  }
+  else if (isCheckable() && isChecked()) {
+    // A chosen option (the service switch): tinted with the accent, like the highlight of the segmented control.
+    p.setPen(QPen(RoomStyle::Mix(RoomStyle::Window(pal), RoomStyle::Accent(pal), 0.5), 1));
+    p.setBrush(RoomStyle::Mix(RoomStyle::Window(pal), RoomStyle::Accent(pal), 0.28 + 0.06 * hover));
+    p.drawRoundedRect(r, radius, radius);
   }
   else {
     p.setPen(QPen(RoomStyle::Mix(RoomStyle::Window(pal), RoomStyle::Text(pal), 0.24 + 0.2 * hover), 1));

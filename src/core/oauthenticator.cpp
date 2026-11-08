@@ -37,6 +37,7 @@
 #include <QJsonParseError>
 #include <QDesktopServices>
 #include <QMessageBox>
+#include <QMetaMethod>
 
 #include "constants/timeconstants.h"
 #include "utilities/randutils.h"
@@ -345,8 +346,15 @@ QUrl OAuthenticator::EffectiveRedirectUrl() const {
 
 void OAuthenticator::Authenticate() {
 
+  // A new sign-in replaces the one before it: a late callback or reply of the earlier attempt can no longer touch this one.
+  if (type_ == Type::Authorization_Code) {
+    AbandonAttempt();
+    ++attempt_;
+  }
+
   if (client_id_.isEmpty()) {
-    Q_EMIT AuthenticationFinished(false, tr("Missing client ID"));
+    finishing_attempt_ = type_ == Type::Authorization_Code ? attempt_ : 0;
+    FinishInteractive(false, tr("Missing client ID"), false);
     return;
   }
 
@@ -360,7 +368,8 @@ void OAuthenticator::Authenticate() {
   }
 
   if (!redirect_url_.isValid()) {
-    Q_EMIT AuthenticationFinished(false, tr("Invalid redirect URL"));
+    finishing_attempt_ = attempt_;
+    FinishInteractive(false, tr("Invalid redirect URL"), false);
     return;
   }
 
@@ -368,8 +377,10 @@ void OAuthenticator::Authenticate() {
     local_redirect_server_.reset(new LocalRedirectServer(this));
     const bool success = local_redirect_server_->Listen();
     if (!success) {
-      Q_EMIT AuthenticationFinished(false, local_redirect_server_->error());
+      const QString error = local_redirect_server_->error();
       local_redirect_server_.reset();
+      finishing_attempt_ = attempt_;
+      FinishInteractive(false, error, false);
       return;
     }
     QObject::connect(&*local_redirect_server_, &LocalRedirectServer::Finished, this, &OAuthenticator::RedirectArrived);
@@ -420,13 +431,21 @@ void OAuthenticator::Authenticate() {
 
   pending_authorize_url_ = url;
 
-  // No modal message box: when the browser can't be started the caller gets the address and shows it inline, the flow stays pending.
   const bool opened = QDesktopServices::openUrl(url);
-  Q_EMIT AuthorizationUrlReady(url, opened);
+  if (isSignalConnected(QMetaMethod::fromSignal(&OAuthenticator::AuthorizationUrlReady))) {
+    // A caller that shows the address itself (the inline Streaming page): no modal box, the flow stays pending.
+    Q_EMIT AuthorizationUrlReady(url, opened);
+  }
+  else if (!opened) {
+    // Every other caller keeps the visible recovery it always had: without a browser the user is told where to go.
+    QMessageBox messagebox(QMessageBox::Information, tr("Authentication"), tr("Please open this URL in your browser") + QStringLiteral(":<br /><a href=\"%1\">%1</a>").arg(url.toString()), QMessageBox::Ok);
+    messagebox.setTextFormat(Qt::RichText);
+    messagebox.exec();
+  }
 
 }
 
-void OAuthenticator::CancelAuthentication() {
+void OAuthenticator::AbandonAttempt() {
 
   state_.clear();
   pending_authorize_url_.clear();
@@ -446,17 +465,38 @@ void OAuthenticator::CancelAuthentication() {
 
 }
 
+void OAuthenticator::CancelAuthentication() {
+
+  // After this nothing of the abandoned attempt can finish it, and nothing is reported: the attempt number moves on so that stale replies are recognisable.
+  AbandonAttempt();
+  ++attempt_;
+
+}
+
+void OAuthenticator::FinishInteractive(const bool success, const QString &error, const bool invalid_grant) {
+
+  const quint64 attempt = finishing_attempt_;
+  finishing_attempt_ = 0;
+  Q_EMIT AuthenticationFinished(success, error, invalid_grant);
+  if (attempt != 0) Q_EMIT InteractiveFinished(attempt, success, error, invalid_grant);
+
+}
+
 void OAuthenticator::RedirectArrived() {
 
-  if (local_redirect_server_.isNull()) {
+  // Only the server of the current attempt counts; a server of an abandoned attempt is gone (or about to be) and must not speak for this one.
+  if (local_redirect_server_.isNull() || sender() != local_redirect_server_.data()) {
     return;
   }
 
   if (local_redirect_server_->success()) {
     AuthorizationUrlReceived(local_redirect_server_->request_url(), EffectiveRedirectUrl());
   }
-  else {
-    Q_EMIT AuthenticationFinished(false, local_redirect_server_->error());
+  else if (!state_.isEmpty()) {
+    const QString error = local_redirect_server_->error();
+    AbandonAttempt();
+    finishing_attempt_ = attempt_;
+    FinishInteractive(false, error, false);
   }
 
   local_redirect_server_.reset();
@@ -471,53 +511,56 @@ void OAuthenticator::ExternalAuthorizationUrlReceived(const QUrl &request_url) {
 
 void OAuthenticator::AuthorizationUrlReceived(const QUrl &request_url, const QUrl &redirect_url) {
 
-  // A callback is only accepted for a sign-in that is waiting for it. A late, repeated or foreign callback (the sign-in was cancelled, finished or replaced)
-  // is refused and never starts a token exchange.
+  // Whatever the reply says, it is only believed when it carries the state of the sign-in that is waiting for it. The state is checked FIRST: a provider
+  // error, a missing code or a malformed address of a reply that cannot be attributed (late, repeated, foreign, or from an abandoned attempt) must not end the
+  // sign-in that is running now. Such a reply is ignored; the pending sign-in and a code exchange that is already under way are left alone.
+  auto ignore = [this](const QString &reason) {
+    if (isSignalConnected(QMetaMethod::fromSignal(&OAuthenticator::CallbackIgnored))) {
+      Q_EMIT CallbackIgnored(reason);
+    }
+    else {
+      // A caller that does not know about attempts keeps the visible failure it always had.
+      Q_EMIT AuthenticationFinished(false, reason);
+    }
+  };
+
   if (state_.isEmpty()) {
-    Q_EMIT AuthenticationFinished(false, tr("No sign-in is waiting for this reply. Start the sign-in again."));
+    ignore(tr("No sign-in is waiting for this reply. Start the sign-in again."));
     return;
   }
-
-  if (!request_url.isValid()) {
-    Q_EMIT AuthenticationFinished(false, tr("Received invalid reply from web browser."));
-    return;
-  }
-
-  if (!request_url.hasQuery()) {
-    Q_EMIT AuthenticationFinished(false, tr("Redirect URL is missing query."));
+  if (!request_url.isValid() || !request_url.hasQuery()) {
+    ignore(tr("The browser reply could not be read and was ignored."));
     return;
   }
 
   QUrlQuery url_query(request_url);
-
-  if (url_query.hasQueryItem(u"error_description"_s)) {
-    Q_EMIT AuthenticationFinished(false, url_query.queryItemValue(u"error_description"_s, QUrl::FullyDecoded));
+  if (!url_query.hasQueryItem(u"state"_s) || url_query.queryItemValue(u"state"_s) != state_) {
+    ignore(tr("This reply belongs to a different sign-in attempt and was ignored."));
     return;
   }
 
-  if (url_query.hasQueryItem(u"error"_s)) {
-    Q_EMIT AuthenticationFinished(false, url_query.queryItemValue(u"error"_s));
-    return;
-  }
-
-  if (!url_query.hasQueryItem(u"code"_s)) {
-    Q_EMIT AuthenticationFinished(false, tr("Request URL is missing code!"));
-    return;
-  }
-
-  if (!url_query.hasQueryItem(u"state"_s)) {
-    Q_EMIT AuthenticationFinished(false, tr("Request URL is missing state!"));
-    return;
-  }
-
-  if (url_query.queryItemValue(u"state"_s) != state_) {
-    Q_EMIT AuthenticationFinished(false, tr("This reply belongs to an earlier sign-in attempt and was ignored."));
-    return;
-  }
-
-  // The state is single use: a repeated callback with the same code can't start a second exchange.
+  // From here on the reply is the answer to the pending sign-in. The state is single use: a repeat of the same callback while the code is being
+  // exchanged finds no sign-in waiting and is ignored above, so it can neither fail nor duplicate the exchange.
+  const quint64 attempt = attempt_;
   state_.clear();
   pending_authorize_url_.clear();
+
+  if (url_query.hasQueryItem(u"error_description"_s) || url_query.hasQueryItem(u"error"_s)) {
+    const QString description = url_query.queryItemValue(u"error_description"_s, QUrl::FullyDecoded);
+    code_verifier_.clear();
+    code_challenge_.clear();
+    finishing_attempt_ = attempt;
+    FinishInteractive(false, description.isEmpty() ? url_query.queryItemValue(u"error"_s, QUrl::FullyDecoded) : description, false);
+    return;
+  }
+
+  if (!url_query.hasQueryItem(u"code"_s) || url_query.queryItemValue(u"code"_s).isEmpty()) {
+    code_verifier_.clear();
+    code_challenge_.clear();
+    finishing_attempt_ = attempt;
+    FinishInteractive(false, tr("The reply of the service did not contain a sign-in code."), false);
+    return;
+  }
 
   RequestAccessToken(url_query.queryItemValue(u"code"_s), redirect_url);
 
@@ -541,6 +584,7 @@ QNetworkReply *OAuthenticator::CreateAccessTokenRequest(const ParamList &params,
   QNetworkReply *reply = network_->post(network_request, url_query.toString(QUrl::FullyEncoded).toUtf8());
   replies_ << reply;
   reply->setProperty("adrift_refresh", refresh_token);
+  reply->setProperty("adrift_attempt", refresh_token ? 0 : static_cast<qulonglong>(attempt_));
   QObject::connect(reply, &QNetworkReply::sslErrors, this, &OAuthenticator::HandleSSLErrors);
   QObject::connect(reply, &QNetworkReply::finished, this, [this, reply, refresh_token]() { AccessTokenRequestFinished(reply, refresh_token); });
 
@@ -626,6 +670,13 @@ void OAuthenticator::AccessTokenRequestFinished(QNetworkReply *reply, const bool
   if (refresh_token) {
     refresh_in_progress_ = false;
   }
+  // The interactive attempt this reply answers (none for a background refresh). A reply of an attempt that was replaced is dropped: Authenticate() and
+  // CancelAuthentication() already abort those, this is the second line of defence.
+  finishing_attempt_ = refresh_token ? 0 : static_cast<quint64>(reply->property("adrift_attempt").toULongLong());
+  if (!refresh_token && finishing_attempt_ != attempt_) {
+    finishing_attempt_ = 0;
+    return;
+  }
 
   if (reply->error() != QNetworkReply::NoError && reply->error() < 200) {
     const QString error_message = QStringLiteral("%1 (%2)").arg(reply->errorString(), QString::number(reply->error()));
@@ -647,7 +698,8 @@ void OAuthenticator::AccessTokenRequestFinished(QNetworkReply *reply, const bool
           // When refreshing, the other OAuth errors also mean the same request will be rejected again, Tidal documents them as logging out.
           // Clear the session to stop the same failure from being repeated, the user has to authenticate again.
           const bool invalid_grant = error.compare("invalid_grant"_L1, Qt::CaseInsensitive) == 0;
-          const bool clear_session = invalid_grant || (refresh_token && IsTerminalRefreshError(error));
+          // A refused code exchange is a failed sign-in, not a reason to throw away a session that may still be good: only a refused refresh clears it.
+          const bool clear_session = refresh_token && (invalid_grant || IsTerminalRefreshError(error));
           if (clear_session) {
             qLog(Error) << settings_group_ << "Authorization grant is no longer valid, clearing session.";
             ClearSession();
@@ -774,7 +826,7 @@ void OAuthenticator::AccessTokenRequestFinished(QNetworkReply *reply, const bool
 
   qLog(Debug) << settings_group_ << "Authentication was successful, login expires in" << expires_in_;
 
-  Q_EMIT AuthenticationFinished(true);
+  FinishInteractive(true, QString(), false);
 
 }
 
@@ -788,6 +840,6 @@ void OAuthenticator::AccessTokenRequestFailed(const bool refresh_token, const QS
     return;
   }
 
-  Q_EMIT AuthenticationFinished(false, error, clear_session);
+  FinishInteractive(false, error, clear_session);
 
 }

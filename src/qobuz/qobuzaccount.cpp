@@ -31,9 +31,8 @@ QobuzAccount::QobuzAccount(QobuzService *service, QObject *parent)
     : AccountBackend(parent),
       service_(service) {
 
-  QObject::connect(service_, &StreamingService::LoginSuccess, this, &AccountBackend::SignInSucceeded);
-  QObject::connect(service_, &StreamingService::LoginFailure, this, &AccountBackend::SignInFailed);
-  QObject::connect(service_, &QobuzService::AuthorizationLinkReady, this, &AccountBackend::LinkReady);
+  QObject::connect(service_, &QobuzService::InteractiveLoginFinished, this, [this](const quint64 attempt, const bool success, const QString &error) { ReportFinished(attempt, success, error); });
+  QObject::connect(service_, &QobuzService::AuthorizationLinkReady, this, [this](const QUrl &url, const bool opened) { ReportLink(url, opened); });
   QObject::connect(service_, &QobuzService::SessionChanged, this, &AccountBackend::SessionChanged);
 
 }
@@ -97,8 +96,20 @@ bool QobuzAccount::SaveSetup(const QMap<QString, QString> &values, QString *erro
 
 }
 
-void QobuzAccount::StartSignIn() { service_->Authenticate(); }
+void QobuzAccount::StartSignIn(const quint64 attempt) {
 
-void QobuzAccount::CancelSignIn() { service_->CancelAuthentication(); }
+  BeginAttempt(attempt);
+  service_->Authenticate();
+  // Authenticate() moved the service's attempt number on; that is the number of this sign-in unless it already ended in there.
+  EndStart(service_->attempt());
+
+}
+
+void QobuzAccount::CancelSignIn() {
+
+  ReleaseAttempt();
+  service_->CancelAuthentication();
+
+}
 
 void QobuzAccount::SignOut() { service_->ClearSession(); }

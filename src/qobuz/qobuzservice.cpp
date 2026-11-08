@@ -280,6 +280,9 @@ void QobuzService::Authenticate(const QString &app_id, const QString &app_secret
 
 void QobuzService::Authenticate() {
 
+  // A new sign-in replaces the one before it: its redirect server and its code exchange are dropped, and a late answer can no longer finish this one.
+  CancelAuthentication();
+
   if (app_id_.isEmpty()) {
     LoginError(tr("Missing app ID. Please fetch credentials first."));
     return;
@@ -327,7 +330,8 @@ void QobuzService::Authenticate() {
 
 void QobuzService::OAuthRedirectReceived() {
 
-  if (!local_redirect_server_) return;
+  // Only the redirect server of the current attempt can answer it.
+  if (!local_redirect_server_ || sender() != local_redirect_server_) return;
 
   LocalRedirectServer *server = local_redirect_server_;
   local_redirect_server_ = nullptr;
@@ -469,6 +473,7 @@ void QobuzService::HandleOAuthCallbackReply(QNetworkReply *reply) {
 
   Q_EMIT LoginFinished(true);
   Q_EMIT LoginSuccess();
+  Q_EMIT InteractiveLoginFinished(attempt_, true, QString());
 
 }
 
@@ -486,6 +491,8 @@ bool QobuzService::authentication_pending() const {
 
 void QobuzService::CancelAuthentication() {
 
+  // The number moves on: nothing of the abandoned attempt can be reported as the result of the next one.
+  ++attempt_;
   pending_sign_in_url_.clear();
 
   if (local_redirect_server_) {
@@ -807,5 +814,6 @@ void QobuzService::LoginError(const QString &error, const QVariant &debug) {
 
   Q_EMIT LoginFailure(error);
   Q_EMIT LoginFinished(false, error);
+  Q_EMIT InteractiveLoginFinished(attempt_, false, error);
 
 }

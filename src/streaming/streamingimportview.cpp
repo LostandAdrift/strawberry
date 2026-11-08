@@ -53,6 +53,8 @@
 #include <QVBoxLayout>
 
 #include "core/song.h"
+#include "listeningroom/roomstyle.h"
+#include "listeningroom/roomwidgets.h"
 #include "playlistimport.h"
 #include "streamingaccount.h"
 #include "streamingimportview.h"
@@ -101,15 +103,13 @@ class Card : public QFrame {
     p.setRenderHint(QPainter::Antialiasing);
     const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
     QPainterPath path;
-    path.addRoundedRect(r, 8, 8);
-    QColor fill = palette().color(QPalette::Base);
-    p.fillPath(path, fill);
-    QColor border = palette().color(QPalette::Mid);
-    p.setPen(QPen(border, 1));
+    path.addRoundedRect(r, 12, 12);
+    p.fillPath(path, RoomStyle::Surface(palette(), 0.05));
+    p.setPen(QPen(RoomStyle::Hairline(palette()), 1));
     p.drawPath(path);
     if (accent_) {
       p.setClipPath(path);
-      p.fillRect(QRectF(r.left(), r.top(), 4, r.height()), alert_ ? AlertColor(palette()) : palette().color(QPalette::Highlight));
+      p.fillRect(QRectF(r.left(), r.top(), 4, r.height()), alert_ ? AlertColor(palette()) : RoomStyle::Accent(palette()));
     }
   }
 
@@ -138,14 +138,14 @@ class Monogram : public QWidget {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
     const QRectF r = QRectF(rect()).adjusted(1, 1, -1, -1);
-    p.setBrush(active_ ? palette().color(QPalette::Highlight) : palette().color(QPalette::Mid));
+    p.setBrush(active_ ? RoomStyle::Mix(RoomStyle::Window(palette()), RoomStyle::Accent(palette()), 0.55) : RoomStyle::Surface(palette(), 0.12));
     p.setPen(Qt::NoPen);
     p.drawEllipse(r);
     QFont f = font();
     f.setBold(true);
     f.setPointSizeF(f.pointSizeF() * 1.35);
     p.setFont(f);
-    p.setPen(active_ ? palette().color(QPalette::HighlightedText) : palette().color(QPalette::WindowText));
+    p.setPen(RoomStyle::Text(palette()));
     p.drawText(rect(), Qt::AlignCenter, letter_);
   }
 
@@ -162,34 +162,40 @@ class PlaylistDelegate : public QStyledItemDelegate {
   QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override {
     Q_UNUSED(index)
     const QFontMetrics fm(option.font);
-    return QSize(200, fm.height() * 2 + 22);
+    return QSize(200, std::max(58, fm.height() * 2 + 26));
   }
 
   void paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const override {
     const PlaylistImport::PlaylistInfo info = index.data(kPlaylistRole).value<PlaylistImport::PlaylistInfo>();
     const bool imported = index.data(kImportedRole).toBool();
     const bool selected = option.state & QStyle::State_Selected;
+    const bool hovered = option.state & QStyle::State_MouseOver;
+    const QPalette &pal = option.palette;
 
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing);
-    const QRectF card = QRectF(option.rect).adjusted(2, 3, -2, -3);
-    QPainterPath path;
-    path.addRoundedRect(card, 7, 7);
-    painter->fillPath(path, selected ? option.palette.color(QPalette::Highlight) : option.palette.color(QPalette::Base));
-    painter->setPen(QPen(selected ? option.palette.color(QPalette::Highlight) : option.palette.color(QPalette::Mid), 1));
-    painter->drawPath(path);
+    const QRectF card = QRectF(option.rect).adjusted(0, 3, 0, -3);
+    // The same cards as the Playlists page: a quiet surface, an accent edge for the chosen one.
+    painter->setPen(QPen(RoomStyle::Hairline(pal), 1));
+    painter->setBrush(selected ? RoomStyle::Surface(pal, 0.12) : (hovered ? RoomStyle::Surface(pal, 0.08) : RoomStyle::Surface(pal, 0.045)));
+    painter->drawRoundedRect(card.adjusted(0.5, 0.5, -0.5, -0.5), 10, 10);
+    if (selected) {
+      painter->setPen(Qt::NoPen);
+      painter->setBrush(RoomStyle::Accent(pal));
+      painter->drawRoundedRect(QRectF(card.left() + 1, card.top() + 10, 3, card.height() - 20), 1.5, 1.5);
+    }
     if (option.state & QStyle::State_HasFocus) {
-      painter->setPen(QPen(option.palette.color(QPalette::Link), 2));
-      painter->drawPath(path);
+      painter->setBrush(Qt::NoBrush);
+      painter->setPen(QPen(RoomStyle::Mix(RoomStyle::Window(pal), RoomStyle::Text(pal), 0.8), 1.5));
+      painter->drawRoundedRect(card.adjusted(1.5, 1.5, -1.5, -1.5), 9, 9);
     }
 
-    const QColor main_color = selected ? option.palette.color(QPalette::HighlightedText) : option.palette.color(QPalette::Text);
-    QColor sub_color = main_color;
-    sub_color.setAlphaF(0.78);
+    const QColor main_color = RoomStyle::Text(pal);
+    const QColor sub_color = RoomStyle::Muted(pal);
 
-    const QRectF inner = card.adjusted(12, 6, -12, -6);
+    const QRectF inner = card.adjusted(18, 6, -16, -6);
     QFont title_font = option.font;
-    title_font.setBold(true);
+    title_font.setWeight(QFont::DemiBold);
     const QFontMetrics tfm(title_font);
     painter->setFont(title_font);
     painter->setPen(main_color);
@@ -247,7 +253,7 @@ QString StreamingImportView::Identity(const QString &url_scheme, const QString &
 void StreamingImportView::Build() {
 
   QVBoxLayout *root = new QVBoxLayout(this);
-  root->setContentsMargins(20, 18, 20, 14);
+  root->setContentsMargins(0, 0, 0, 8);
   root->setSpacing(12);
 
   // Header card
@@ -266,16 +272,14 @@ void StreamingImportView::Build() {
   QVBoxLayout *texts_layout = new QVBoxLayout(texts);
   texts_layout->setContentsMargins(0, 0, 0, 0);
   texts_layout->setSpacing(2);
-  label_account_title_ = new QLabel;
-  QFont title_font = label_account_title_->font();
-  title_font.setBold(true);
-  title_font.setPointSizeF(title_font.pointSizeF() * 1.25);
-  label_account_title_->setFont(title_font);
+  label_account_title_ = MakeLabel(QString(), false);
+  StyleLabel(label_account_title_, RoomStyle::Scaled(font(), 1.3, true), ElidedLabel::Tone::Normal);
   label_account_title_->setTextFormat(Qt::PlainText);
-  label_account_status_ = new QLabel;
+  label_account_status_ = MakeLabel(QString(), false);
   label_account_status_->setTextFormat(Qt::PlainText);
   label_account_status_->setWordWrap(true);
   label_account_status_->setAccessibleName(tr("Account status"));
+  StyleLabel(label_account_status_, font(), ElidedLabel::Tone::Muted);
   texts_layout->addWidget(label_account_title_);
   texts_layout->addWidget(label_account_status_);
 
@@ -286,9 +290,8 @@ void StreamingImportView::Build() {
   service_group_ = new QButtonGroup(this);
   service_group_->setExclusive(true);
 
-  button_account_ = new QPushButton;
-  button_account_->setDefault(false);
-  button_signout_ = new QPushButton(tr("Sign out"));
+  button_account_ = new RoomButton(QString());
+  button_signout_ = new RoomButton(tr("Sign out"));
   button_signout_->setAccessibleDescription(tr("Removes the stored sign-in of this service from Adrift. Imported playlists stay."));
 
   QHBoxLayout *identity = new QHBoxLayout;
@@ -314,21 +317,21 @@ void StreamingImportView::Build() {
   root->addWidget(pages_, 1);
 
   // Footer
-  label_status_ = new QLabel;
+  label_status_ = MakeLabel(QString(), false);
   label_status_->setTextFormat(Qt::PlainText);
   label_status_->setWordWrap(true);
   label_status_->setAccessibleName(tr("Import status"));
+  StyleLabel(label_status_, font(), ElidedLabel::Tone::Muted);
   label_status_->setTextInteractionFlags(Qt::TextSelectableByMouse);
   progress_ = new QProgressBar;
   progress_->setTextVisible(true);
   progress_->setAccessibleName(tr("Progress"));
   progress_->hide();
-  button_cancel_ = new QPushButton(tr("Cancel"));
+  button_cancel_ = new RoomButton(tr("Cancel"));
   button_cancel_->setAccessibleDescription(tr("Stops reading. Nothing is imported."));
-  button_import_ = new QPushButton(tr("Import"));
-  button_import_->setDefault(true);
-  button_browse_ = new QPushButton;
-  button_open_ = new QPushButton(tr("Open imported playlist"));
+  button_import_ = new RoomButton(tr("Import"), true);
+  button_browse_ = new RoomButton(QString());
+  button_open_ = new RoomButton(tr("Open imported playlist"));
   button_open_->hide();
 
   QHBoxLayout *progress_row = new QHBoxLayout;
@@ -391,20 +394,18 @@ void StreamingImportView::BuildBanner() {
   layout->setContentsMargins(18, 10, 14, 10);
   layout->setSpacing(6);
 
-  banner_title_ = new QLabel;
+  banner_title_ = MakeLabel(QString(), false);
   banner_title_->setTextFormat(Qt::PlainText);
-  QFont f = banner_title_->font();
-  f.setBold(true);
-  banner_title_->setFont(f);
-  banner_message_ = new QLabel;
+  StyleLabel(banner_title_, RoomStyle::Scaled(font(), 1.05, true), ElidedLabel::Tone::Normal);
+  banner_message_ = MakeLabel(QString(), false);
   banner_message_->setTextFormat(Qt::PlainText);
   banner_message_->setWordWrap(true);
   banner_message_->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
-  banner_primary_ = new QPushButton;
-  banner_retry_ = new QPushButton(tr("Retry"));
+  banner_primary_ = new RoomButton(QString());
+  banner_retry_ = new RoomButton(tr("Retry"));
   banner_retry_->setAccessibleDescription(tr("Reads again. Only reads from the service, nothing is written to it."));
-  banner_dismiss_ = new QPushButton(tr("Dismiss"));
+  banner_dismiss_ = new RoomButton(tr("Dismiss"));
   banner_details_toggle_ = new QToolButton;
   banner_details_toggle_->setText(tr("Technical details"));
   banner_details_toggle_->setCheckable(true);
@@ -456,19 +457,19 @@ void StreamingImportView::BuildPages() {
     QWidget *page = new QWidget;
     QVBoxLayout *layout = new QVBoxLayout(page);
     layout->setContentsMargins(4, 8, 4, 8);
-    label_setup_help_ = new QLabel;
+    label_setup_help_ = MakeLabel(QString(), false);
     label_setup_help_->setWordWrap(true);
     label_setup_help_->setTextFormat(Qt::PlainText);
     label_setup_help_->setAccessibleName(tr("Setup needed"));
+    StyleLabel(label_setup_help_, font(), ElidedLabel::Tone::Muted);
     setup_form_ = new QWidget;
     new QFormLayout(setup_form_);
-    label_setup_error_ = new QLabel;
+    label_setup_error_ = MakeLabel(QString(), false);
     label_setup_error_->setWordWrap(true);
     label_setup_error_->setTextFormat(Qt::PlainText);
     label_setup_error_->hide();
-    button_save_setup_ = new QPushButton(tr("Save and continue"));
-    button_advanced_ = new QPushButton(tr("Advanced settings…"));
-    button_advanced_->setFlat(true);
+    button_save_setup_ = new RoomButton(tr("Save and continue"));
+    button_advanced_ = new RoomButton(tr("Advanced settings…"));
     QHBoxLayout *row = new QHBoxLayout;
     row->addWidget(button_save_setup_);
     row->addStretch(1);
@@ -491,19 +492,17 @@ void StreamingImportView::BuildPages() {
     QVBoxLayout *layout = new QVBoxLayout(page);
     layout->setContentsMargins(4, 8, 4, 8);
     layout->addStretch(1);
-    label_signedout_title_ = new QLabel;
-    QFont f = label_signedout_title_->font();
-    f.setBold(true);
-    f.setPointSizeF(f.pointSizeF() * 1.3);
-    label_signedout_title_->setFont(f);
+    label_signedout_title_ = MakeLabel(QString(), false);
+    StyleLabel(label_signedout_title_, RoomStyle::Scaled(font(), 1.4, true), ElidedLabel::Tone::Normal);
     label_signedout_title_->setAlignment(Qt::AlignHCenter);
     label_signedout_title_->setWordWrap(true);
     label_signedout_title_->setTextFormat(Qt::PlainText);
-    label_signedout_help_ = new QLabel;
+    label_signedout_help_ = MakeLabel(QString(), false);
     label_signedout_help_->setAlignment(Qt::AlignHCenter);
+    StyleLabel(label_signedout_help_, RoomStyle::Scaled(font(), 1.05), ElidedLabel::Tone::Muted);
     label_signedout_help_->setWordWrap(true);
     label_signedout_help_->setTextFormat(Qt::PlainText);
-    button_signin_page_ = new QPushButton;
+    button_signin_page_ = new RoomButton(QString());
     layout->addWidget(label_signedout_title_);
     layout->addWidget(label_signedout_help_);
     layout->addSpacing(6);
@@ -519,17 +518,15 @@ void StreamingImportView::BuildPages() {
     QVBoxLayout *layout = new QVBoxLayout(page);
     layout->setContentsMargins(4, 8, 4, 8);
     layout->addStretch(1);
-    QLabel *title = new QLabel(tr("Waiting for your browser…"));
-    QFont f = title->font();
-    f.setBold(true);
-    f.setPointSizeF(f.pointSizeF() * 1.3);
-    title->setFont(f);
+    QLabel *title = MakeLabel(tr("Waiting for your browser…"), false);
+    StyleLabel(title, RoomStyle::Scaled(font(), 1.4, true), ElidedLabel::Tone::Normal);
     title->setAlignment(Qt::AlignHCenter);
-    label_waiting_help_ = new QLabel;
+    label_waiting_help_ = MakeLabel(QString(), false);
     label_waiting_help_->setAlignment(Qt::AlignHCenter);
     label_waiting_help_->setWordWrap(true);
     label_waiting_help_->setTextFormat(Qt::PlainText);
     label_waiting_help_->setAccessibleName(tr("Sign-in steps"));
+    StyleLabel(label_waiting_help_, RoomStyle::Scaled(font(), 1.05), ElidedLabel::Tone::Muted);
     QProgressBar *busy = new QProgressBar;
     busy->setRange(0, 0);
     busy->setTextVisible(false);
@@ -541,11 +538,11 @@ void StreamingImportView::BuildPages() {
     link_edit_ = new QLineEdit;
     link_edit_->setReadOnly(true);
     link_edit_->setAccessibleName(tr("Sign-in address"));
-    button_copy_link_ = new QPushButton(tr("Copy address"));
+    button_copy_link_ = new RoomButton(tr("Copy address"));
     link_layout->addWidget(link_edit_, 1);
     link_layout->addWidget(button_copy_link_);
     link_row_->hide();
-    button_cancel_signin_ = new QPushButton(tr("Cancel sign-in"));
+    button_cancel_signin_ = new RoomButton(tr("Cancel sign-in"));
     layout->addWidget(title);
     layout->addWidget(label_waiting_help_);
     layout->addWidget(busy, 0, Qt::AlignHCenter);
@@ -565,9 +562,9 @@ void StreamingImportView::BuildPages() {
     QWidget *page = new QWidget;
     QVBoxLayout *layout = new QVBoxLayout(page);
     layout->addStretch(1);
-    label_loading_ = new QLabel;
+    label_loading_ = MakeLabel(QString(), false);
     label_loading_->setAlignment(Qt::AlignHCenter);
-    label_loading_->setTextFormat(Qt::PlainText);
+    StyleLabel(label_loading_, RoomStyle::Scaled(font(), 1.1), ElidedLabel::Tone::Muted);
     layout->addWidget(label_loading_);
     layout->addStretch(2);
     pages_->addWidget(page);
@@ -579,18 +576,19 @@ void StreamingImportView::BuildPages() {
     QVBoxLayout *layout = new QVBoxLayout(page);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(8);
-    search_ = new QLineEdit;
-    search_->setPlaceholderText(tr("Search playlists"));
-    search_->setClearButtonEnabled(true);
+    RoomSearchField *search_field = new RoomSearchField;
+    search_field->SetPlaceholder(tr("Search playlists"));
+    search_ = search_field->edit();
     search_->setAccessibleName(tr("Search playlists"));
-    label_list_summary_ = new QLabel;
+    label_list_summary_ = MakeLabel(QString(), false);
     label_list_summary_->setTextFormat(Qt::PlainText);
     label_list_summary_->setWordWrap(true);
     label_list_summary_->setAccessibleName(tr("List summary"));
-    button_reload_ = new QPushButton(tr("Refresh list"));
+    StyleLabel(label_list_summary_, font(), ElidedLabel::Tone::Faint);
+    button_reload_ = new RoomButton(tr("Refresh list"));
     button_reload_->setAccessibleDescription(tr("Reads your playlists from the service again."));
     QHBoxLayout *top = new QHBoxLayout;
-    top->addWidget(search_, 1);
+    top->addWidget(search_field, 1);
     top->addWidget(button_reload_);
     list_ = new QListWidget;
     list_->setAccessibleName(tr("Remote playlists"));
@@ -599,6 +597,10 @@ void StreamingImportView::BuildPages() {
     list_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     list_->setFrameShape(QFrame::NoFrame);
     list_->setUniformItemSizes(true);
+    // The cards sit on the page, not on a darker panel of their own.
+    list_->setAutoFillBackground(false);
+    list_->viewport()->setAutoFillBackground(false);
+    list_->setMouseTracking(true);
     layout->addLayout(top);
     layout->addWidget(label_list_summary_);
     layout->addWidget(list_, 1);
@@ -618,11 +620,11 @@ void StreamingImportView::BuildPages() {
     QWidget *page = new QWidget;
     QVBoxLayout *layout = new QVBoxLayout(page);
     layout->addStretch(1);
-    label_empty_ = new QLabel;
+    label_empty_ = MakeLabel(QString(), false);
     label_empty_->setAlignment(Qt::AlignHCenter);
     label_empty_->setWordWrap(true);
-    label_empty_->setTextFormat(Qt::PlainText);
-    button_empty_reload_ = new QPushButton(tr("Check again"));
+    StyleLabel(label_empty_, RoomStyle::Scaled(font(), 1.1), ElidedLabel::Tone::Muted);
+    button_empty_reload_ = new RoomButton(tr("Check again"));
     layout->addWidget(label_empty_);
     layout->addWidget(button_empty_reload_, 0, Qt::AlignHCenter);
     layout->addStretch(2);
@@ -637,11 +639,11 @@ void StreamingImportView::BuildPages() {
     QWidget *page = new QWidget;
     QVBoxLayout *layout = new QVBoxLayout(page);
     layout->addStretch(1);
-    label_unloaded_ = new QLabel;
+    label_unloaded_ = MakeLabel(QString(), false);
     label_unloaded_->setAlignment(Qt::AlignHCenter);
     label_unloaded_->setWordWrap(true);
-    label_unloaded_->setTextFormat(Qt::PlainText);
-    button_load_ = new QPushButton(tr("Load playlists"));
+    StyleLabel(label_unloaded_, RoomStyle::Scaled(font(), 1.1), ElidedLabel::Tone::Muted);
+    button_load_ = new RoomButton(tr("Load playlists"));
     layout->addWidget(label_unloaded_);
     layout->addWidget(button_load_, 0, Qt::AlignHCenter);
     layout->addStretch(2);
@@ -670,9 +672,8 @@ void StreamingImportView::AddService(const ServiceEntry &entry) {
 
   ConnectService(svc);
 
-  QPushButton *button = new QPushButton(entry.name);
+  RoomButton *button = new RoomButton(entry.name);
   button->setCheckable(true);
-  button->setFlat(true);
   button->setAccessibleName(tr("Show %1").arg(entry.name));
   button->setObjectName(u"service_"_s + entry.account->key());
   service_switch_->layout()->addWidget(button);
@@ -1141,6 +1142,7 @@ void StreamingImportView::UpdateHeader(const Svc *svc) {
   }
   label_account_status_->setText(status);
   button_account_->setText(action);
+  static_cast<RoomButton*>(button_account_)->SetPrimary(state == AccountSession::State::SignedOut || state == AccountSession::State::NeedsSetup);
   button_account_->setAccessibleName(tr("%1: %2").arg(action, svc->entry.name));
   button_account_->setEnabled(!svc->importer->busy());
   button_signout_->setVisible(state == AccountSession::State::SignedIn);
@@ -1180,6 +1182,7 @@ void StreamingImportView::UpdateBanner(const Svc *svc) {
     }
     banner_primary_->setVisible(!primary.isEmpty());
     banner_primary_->setText(primary);
+    static_cast<RoomButton*>(banner_primary_)->SetPrimary(true);
     banner_primary_->setAccessibleName(tr("%1 %2").arg(primary, svc->entry.name));
 
     const bool can_retry = f.retryable && svc->last_op.kind != Op::Kind::None;
@@ -1400,7 +1403,7 @@ void StreamingImportView::UpdateFooter(const Svc *svc) {
   button_load_->setEnabled(!busy_now && signed_in);
 
   button_browse_->show();
-  button_browse_->setText(tr("Browse %1 in Library").arg(svc->entry.name));
+  button_browse_->setText(tr("Browse %1 favorites").arg(svc->entry.name));
   button_open_->setVisible(!svc->opened_identity.isEmpty() && !busy_now);
 
   if (!busy_now) {
@@ -1421,7 +1424,7 @@ void StreamingImportView::ApplyCompact() {
   header_layout_->setSpacing(compact ? 8 : 14);
   // Compact: the footer buttons stack, the primary action first.
   if (footer_buttons_) footer_buttons_->setDirection(compact ? QBoxLayout::BottomToTop : QBoxLayout::LeftToRight);
-  if (QBoxLayout *root = qobject_cast<QBoxLayout*>(layout())) root->setContentsMargins(compact ? 10 : 20, compact ? 10 : 18, compact ? 10 : 20, 14);
+  if (QBoxLayout *root = qobject_cast<QBoxLayout*>(layout())) root->setContentsMargins(0, 0, 0, 8);
 
 }
 

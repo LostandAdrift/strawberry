@@ -872,7 +872,6 @@ set(SOURCES
   src/streaming/streamingservices.cpp
   src/streaming/streamingservice.cpp
   src/streaming/playlistimport.cpp
-  src/streaming/playlistimportdialog.cpp
   src/streaming/streamingaccount.cpp
   src/streaming/streamingimportview.cpp
   src/streaming/streamserviceplaylistitem.cpp
@@ -1204,7 +1203,6 @@ set(HEADERS
   src/streaming/streamingservices.h
   src/streaming/streamingservice.h
   src/streaming/playlistimport.h
-  src/streaming/playlistimportdialog.h
   src/streaming/streamingaccount.h
   src/streaming/streamingimportview.h
   src/streaming/streamsongmimedata.h

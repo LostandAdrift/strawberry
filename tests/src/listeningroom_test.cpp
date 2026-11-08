@@ -659,60 +659,54 @@ TEST(ListeningRoomTest, ImportEntryPointsOnThePlaylistsPage) {
 
 }
 
-TEST(ListeningRoomTest, StreamingPageShowsRealStateAndRoutesActions) {
+TEST(ListeningRoomTest, StreamingPageIsOneHostedWidgetWithoutDuplicatedCardsOrHeaders) {
 
   ListeningRoom room;
   ShowAt(room, 1440, 900);
   room.nav_button(ListeningRoom::View::Streaming)->click();
 
+  // Without services the page says so honestly; with services the room only has the entry points that lead to the hosted page.
+  room.SetStreamingServices({});
+  QCoreApplication::processEvents();
+  EXPECT_FALSE(room.playlists_import_button()->isVisible() && room.view() == ListeningRoom::View::Playlists);
+  EXPECT_FALSE(room.page(ListeningRoom::View::Streaming)->findChildren<QLabel*>().isEmpty());
+
   RoomServiceCard tidal;
   tidal.key = QStringLiteral("tidal");
   tidal.name = QStringLiteral("Tidal");
-  tidal.status = QStringLiteral("Signed in");
-  tidal.signed_in = true;
-  RoomServiceCard qobuz;
-  qobuz.key = QStringLiteral("qobuz");
-  qobuz.name = QStringLiteral("Qobuz");
-  qobuz.status = QStringLiteral("Not signed in");
-  qobuz.signed_in = false;
-  room.SetStreamingServices({ tidal, qobuz });
+  room.SetStreamingServices({ tidal });
+
+  // One heading, one hosted page: no service cards of the room's own (those were a second, competing set of buttons and statuses).
+  QLabel host_page(QStringLiteral("hosted streaming page"));
+  room.SetStreamingWidget(&host_page);
   QCoreApplication::processEvents();
+  EXPECT_TRUE(host_page.isVisible());
+  EXPECT_EQ(&host_page, room.streaming_widget());
+  EXPECT_TRUE(room.page(ListeningRoom::View::Streaming)->isAncestorOf(&host_page));
+  EXPECT_TRUE(room.page(ListeningRoom::View::Streaming)->findChildren<QWidget*>(QRegularExpression(QStringLiteral("^service_"))).isEmpty());
+  int titles = 0;
+  for (QLabel *label : room.page(ListeningRoom::View::Streaming)->findChildren<QLabel*>(QStringLiteral("page_title"))) {
+    if (label->isVisible()) ++titles;
+  }
+  EXPECT_EQ(1, titles);
+  // The "not built in" message is gone once a page is hosted.
+  for (QLabel *label : room.page(ListeningRoom::View::Streaming)->findChildren<QLabel*>()) {
+    EXPECT_FALSE(label->isVisible() && label->text().contains(QStringLiteral("No streaming service")));
+  }
 
-  QWidget *tidal_card = room.streaming_cards()->findChild<QWidget*>(QStringLiteral("service_tidal"));
-  QWidget *qobuz_card = room.streaming_cards()->findChild<QWidget*>(QStringLiteral("service_qobuz"));
-  ASSERT_NE(nullptr, tidal_card);
-  ASSERT_NE(nullptr, qobuz_card);
-  EXPECT_EQ(QStringLiteral("Signed in"), tidal_card->findChild<QLabel*>(QStringLiteral("status"))->text());
-  EXPECT_EQ(QStringLiteral("Not signed in"), qobuz_card->findChild<QLabel*>(QStringLiteral("status"))->text());
-
-  // Browsing and importing need a signed-in account; signing in is always possible.
-  EXPECT_TRUE(tidal_card->findChild<QPushButton*>(QStringLiteral("browse"))->isEnabled());
-  EXPECT_TRUE(tidal_card->findChild<QPushButton*>(QStringLiteral("import"))->isEnabled());
-  EXPECT_FALSE(qobuz_card->findChild<QPushButton*>(QStringLiteral("browse"))->isEnabled());
-  EXPECT_FALSE(qobuz_card->findChild<QPushButton*>(QStringLiteral("import"))->isEnabled());
-  EXPECT_TRUE(qobuz_card->findChild<QPushButton*>(QStringLiteral("settings"))->isEnabled());
-
-  QSignalSpy browse(&room, &ListeningRoom::BrowseServiceRequested);
+  // The entry points of the other pages ask for the hosted page; they never open anything themselves.
   QSignalSpy import(&room, &ListeningRoom::ImportPlaylistsRequested);
-  QSignalSpy settings(&room, &ListeningRoom::ServiceSettingsRequested);
-  tidal_card->findChild<QPushButton*>(QStringLiteral("browse"))->click();
-  tidal_card->findChild<QPushButton*>(QStringLiteral("import"))->click();
-  qobuz_card->findChild<QPushButton*>(QStringLiteral("settings"))->click();
-  ASSERT_EQ(1, browse.count());
+  room.SetView(ListeningRoom::View::Playlists);
+  room.playlists_import_button()->click();
   ASSERT_EQ(1, import.count());
-  ASSERT_EQ(1, settings.count());
-  EXPECT_EQ(QStringLiteral("tidal"), browse.first().first().toString());
-  EXPECT_EQ(QStringLiteral("tidal"), import.first().first().toString());
-  EXPECT_EQ(QStringLiteral("qobuz"), settings.first().first().toString());
+  EXPECT_TRUE(import.first().first().toString().isEmpty());
 
-  // The state is rebuilt, never duplicated, when it changes (for example after signing in).
-  qobuz.signed_in = true;
-  qobuz.status = QStringLiteral("Signed in");
-  room.SetStreamingServices({ tidal, qobuz });
-  qobuz_card = room.streaming_cards()->findChild<QWidget*>(QStringLiteral("service_qobuz"));
-  ASSERT_NE(nullptr, qobuz_card);
-  EXPECT_TRUE(qobuz_card->findChild<QPushButton*>(QStringLiteral("import"))->isEnabled());
-  EXPECT_EQ(2, room.streaming_cards()->findChildren<QWidget*>(QRegularExpression(QStringLiteral("^service_"))).size());
+  // Replacing the hosted widget gives the old one up.
+  QLabel other(QStringLiteral("other"));
+  room.SetStreamingWidget(&other);
+  EXPECT_FALSE(host_page.isVisible());
+  room.SetStreamingWidget(nullptr);
+  EXPECT_EQ(nullptr, room.streaming_widget());
 
 }
 
@@ -1026,11 +1020,11 @@ TEST(ListeningRoomTest, PageHeadingsLineUpAcrossPages) {
   EXPECT_GE(button_pos.y(), playlists_pos.y() - 4);
   EXPECT_LE(button_pos.y(), playlists_pos.y() + 12);
 
-  // The manual refresh hint belongs to the Streaming page only.
+  // The Streaming page says in its own heading that imported playlists are refreshed by hand (there is no separate tag for it).
   room.nav_button(ListeningRoom::View::Streaming)->click();
-  QLabel *manual = room.page(ListeningRoom::View::Streaming)->findChild<QLabel*>(QStringLiteral("manual_refresh"));
-  ASSERT_NE(nullptr, manual);
-  EXPECT_TRUE(manual->isVisible());
+  QLabel *description = room.page(ListeningRoom::View::Streaming)->findChild<QLabel*>(QStringLiteral("page_description"));
+  ASSERT_NE(nullptr, description);
+  EXPECT_TRUE(description->text().contains(QStringLiteral("refresh")));
 
 }
 

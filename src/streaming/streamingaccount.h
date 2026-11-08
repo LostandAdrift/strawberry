@@ -63,18 +63,41 @@ class AccountBackend : public QObject {
 
   // Stores the values of setup_fields(). Returns false with an explanation when they are not usable.
   virtual bool SaveSetup(const QMap<QString, QString> &values, QString *error) = 0;
-  virtual void StartSignIn() = 0;
+  // Starts the interactive sign-in `attempt` (the number is chosen by the AccountSession). Every event the backend reports for it carries that number; the backend
+  // must not report background token refreshes, late callbacks or the events of an earlier attempt under it.
+  virtual void StartSignIn(const quint64 attempt) = 0;
   // Abandons a sign-in in progress. After this no callback may finish it.
   virtual void CancelSignIn() = 0;
   virtual void SignOut() = 0;
 
  Q_SIGNALS:
-  void SignInSucceeded();
-  void SignInFailed(const QString &message);
+  // The outcome of sign-in `attempt`. The session believes only the attempt it is waiting for.
+  void SignInSucceeded(const quint64 attempt);
+  void SignInFailed(const quint64 attempt, const QString &message);
   // The stored session or the credentials changed behind the UI's back (logout, refused refresh token).
   void SessionChanged();
   // The browser address of the sign-in in progress. `opened` is false when no browser could be started.
-  void LinkReady(const QUrl &url, const bool opened);
+  void LinkReady(const quint64 attempt, const QUrl &url, const bool opened);
+
+ protected:
+  // Attempt bookkeeping for the adapters. The session numbers its attempts and the service numbers its own; these map between the two so that only events
+  // of the sign-in the session is waiting for are reported, under the session's number:
+  //   BeginAttempt(n)        the session starts attempt n; events that arrive before EndStart() are necessarily about it (the service may fail at once)
+  //   EndStart(service_n)    StartSignIn() returned; from now on only the service's own number service_n belongs to the attempt
+  //   ReportFinished(...)    an outcome from the service; passed on only if it carries the number of the attempt in progress
+  //   ReportLink(...)        the browser address; passed on only while the sign-in is being started (it is announced there and never later)
+  //   ReleaseAttempt()       the attempt ended or was cancelled: nothing more is passed on
+  void BeginAttempt(const quint64 session_attempt);
+  void EndStart(const quint64 service_attempt);
+  void ReleaseAttempt();
+  bool OwnsServiceAttempt(const quint64 service_attempt) const;
+  void ReportFinished(const quint64 service_attempt, const bool success, const QString &error);
+  void ReportLink(const QUrl &url, const bool opened);
+
+ private:
+  quint64 session_attempt_ = 0;
+  quint64 service_attempt_ = 0;
+  bool starting_ = false;
 };
 
 class AccountSession : public QObject {
@@ -99,7 +122,8 @@ class AccountSession : public QObject {
   QString account_key() const { return backend_->account_key(); }
   QUrl link() const { return link_; }
   bool link_opened() const { return link_opened_; }
-  // Counts every attempt. Used by callers and tests to tell attempts apart.
+  // The number of the latest attempt (every sign-in, cancel, timeout and replacement moves it on). Backend events are accepted only for the attempt the session
+  // is waiting for, which is exactly the number it passed to StartSignIn().
   int attempt() const { return attempt_; }
   // True when the last finished attempt ended because it ran out of time.
   bool last_attempt_timed_out() const { return timed_out_; }
@@ -119,9 +143,9 @@ class AccountSession : public QObject {
   void LinkChanged();
 
  private Q_SLOTS:
-  void BackendSucceeded();
-  void BackendFailed(const QString &message);
-  void BackendLink(const QUrl &url, const bool opened);
+  void BackendSucceeded(const quint64 attempt);
+  void BackendFailed(const quint64 attempt, const QString &message);
+  void BackendLink(const quint64 attempt, const QUrl &url, const bool opened);
   void TimedOut();
 
  private:

@@ -43,6 +43,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QStorageInfo>
 #include <QFontMetrics>
 #include <QList>
 #include <QSet>
@@ -114,11 +116,11 @@
 #include "dialogs/errordialog.h"
 #include "dialogs/signalpathdialog.h"
 #include "listeningroom/libraryview.h"
+#include "streaming/streamingimportview.h"
 #include "listeningroom/librarysource.h"
 #include "listeningroom/listeningroom.h"
 #include "listeningroom/roomqueuemodel.h"
 #include "listeningroom/transportbar.h"
-#include "streaming/playlistimportdialog.h"
 #include "widgets/signalpathwidget.h"
 #include "dialogs/aboutdialog.h"
 #include "dialogs/console.h"
@@ -179,12 +181,15 @@
 #include "constants/appearancesettings.h"
 #include "constants/backendsettings.h"
 #include "constants/collectionsettings.h"
+#include "constants/filesystemconstants.h"
+#include "core/standardpaths.h"
 #include "constants/playlistsettings.h"
 #ifdef HAVE_SUBSONIC
 #  include "constants/subsonicsettings.h"
 #endif
 #ifdef HAVE_TIDAL
 #  include "tidal/tidalservice.h"
+#  include "tidal/tidalaccount.h"
 #  include "tidal/tidalplaylistsource.h"
 #  include "constants/tidalsettings.h"
 #endif
@@ -195,6 +200,7 @@
 #endif
 #ifdef HAVE_QOBUZ
 #  include "qobuz/qobuzservice.h"
+#  include "qobuz/qobuzaccount.h"
 #  include "qobuz/qobuzplaylistsource.h"
 #  include "qobuz/qobuzmetadatarequest.h"
 #  include "constants/qobuzsettings.h"
@@ -659,7 +665,7 @@ MainWindow::MainWindow(Application *app,
   QObject::connect(ui_->action_auto_complete_tags, &QAction::triggered, this, &MainWindow::AutoCompleteTags);
 #endif
   QObject::connect(ui_->action_settings, &QAction::triggered, this, &MainWindow::OpenSettingsDialog);
-  QObject::connect(ui_->action_import_streaming_playlists, &QAction::triggered, this, [this]() { ShowPlaylistImportDialog(); });
+  QObject::connect(ui_->action_import_streaming_playlists, &QAction::triggered, this, [this]() { ShowStreamingAccount(); });
   QObject::connect(ui_->action_toggle_show_sidebar, &QAction::toggled, this, &MainWindow::ToggleSidebar);
   QObject::connect(ui_->action_about_strawberry, &QAction::triggered, this, &MainWindow::ShowAboutDialog);
   QObject::connect(ui_->action_about_qt, &QAction::triggered, qApp, &QApplication::aboutQt);
@@ -867,11 +873,11 @@ MainWindow::MainWindow(Application *app,
 #endif
 
 #ifdef HAVE_TIDAL
-  QObject::connect(tidal_view_, &StreamingFavoritesView::OpenSettingsDialog, this, &MainWindow::OpenServiceSettingsDialog);
+  QObject::connect(tidal_view_, &StreamingFavoritesView::OpenSettingsDialog, this, &MainWindow::OpenServiceAccountOrSettings);
   QObject::connect(tidal_view_->artists_collection_view(), &StreamingCollectionView::AddToPlaylistSignal, this, &MainWindow::AddToPlaylist);
   QObject::connect(tidal_view_->albums_collection_view(), &StreamingCollectionView::AddToPlaylistSignal, this, &MainWindow::AddToPlaylist);
   QObject::connect(tidal_view_->songs_collection_view(), &StreamingCollectionView::AddToPlaylistSignal, this, &MainWindow::AddToPlaylist);
-  QObject::connect(tidal_view_->search_view(), &StreamingSearchView::OpenSettingsDialog, this, &MainWindow::OpenServiceSettingsDialog);
+  QObject::connect(tidal_view_->search_view(), &StreamingSearchView::OpenSettingsDialog, this, &MainWindow::OpenServiceAccountOrSettings);
   QObject::connect(tidal_view_->search_view(), &StreamingSearchView::AddToPlaylist, this, &MainWindow::AddToPlaylist);
   if (TidalServicePtr tidalservice = app_->streaming_services()->Service<TidalService>()) {
     QObject::connect(this, &MainWindow::AuthorizationUrlReceived, &*tidalservice, &TidalService::AuthorizationUrlReceived);
@@ -879,11 +885,11 @@ MainWindow::MainWindow(Application *app,
 #endif
 
 #ifdef HAVE_QOBUZ
-  QObject::connect(qobuz_view_, &StreamingFavoritesView::OpenSettingsDialog, this, &MainWindow::OpenServiceSettingsDialog);
+  QObject::connect(qobuz_view_, &StreamingFavoritesView::OpenSettingsDialog, this, &MainWindow::OpenServiceAccountOrSettings);
   QObject::connect(qobuz_view_->artists_collection_view(), &StreamingCollectionView::AddToPlaylistSignal, this, &MainWindow::AddToPlaylist);
   QObject::connect(qobuz_view_->albums_collection_view(), &StreamingCollectionView::AddToPlaylistSignal, this, &MainWindow::AddToPlaylist);
   QObject::connect(qobuz_view_->songs_collection_view(), &StreamingCollectionView::AddToPlaylistSignal, this, &MainWindow::AddToPlaylist);
-  QObject::connect(qobuz_view_->search_view(), &StreamingSearchView::OpenSettingsDialog, this, &MainWindow::OpenServiceSettingsDialog);
+  QObject::connect(qobuz_view_->search_view(), &StreamingSearchView::OpenSettingsDialog, this, &MainWindow::OpenServiceAccountOrSettings);
   QObject::connect(qobuz_view_->search_view(), &StreamingSearchView::AddToPlaylist, this, &MainWindow::AddToPlaylist);
 #endif
 
@@ -1282,7 +1288,13 @@ MainWindow::MainWindow(Application *app,
 }
 
 MainWindow::~MainWindow() {
+
+  // The Streaming page widget is created here and only hosted by the room: it stops its requests and sign-ins while the services are still alive.
+  if (room_) room_->SetStreamingWidget(nullptr);
+  delete streaming_view_;
+  streaming_view_ = nullptr;
   delete ui_;
+
 }
 
 void MainWindow::ReloadSettings() {
@@ -1776,52 +1788,104 @@ void MainWindow::ShowSignalPathDialog() {
 
 }
 
-void MainWindow::ShowPlaylistImportDialog(const QString &service_key) {
+void MainWindow::BuildStreamingView() {
 
-  if (!playlist_import_dialog_) {
-    PlaylistImportDialog *dialog = new PlaylistImportDialog(this);
+  if (streaming_view_) return;
+
+  // The Streaming page of the room: accounts, playlist import and every failure, inline. The room gives it its place; the sources and accounts are its children.
+  streaming_view_ = new StreamingImportView;
 
 #ifdef HAVE_TIDAL
-    if (TidalServicePtr tidal = app_->streaming_services()->Service<TidalService>()) {
-      PlaylistImportDialog::ServiceEntry entry;
-      entry.name = u"Tidal"_s;
-      entry.url_scheme = tidal->url_scheme();
-      entry.song_source = Song::Source::Tidal;
-      entry.page_source = new TidalPlaylistSource(&*tidal, app_->network(), dialog);
-      entry.logged_in = [tidal]() { return tidal->authenticated(); };
-      entry.account_key = [tidal]() { return tidal->authenticated() ? QString::number(tidal->user_id()) : QString(); };
-      dialog->AddService(entry);
-    }
+  if (TidalServicePtr tidal = app_->streaming_services()->Service<TidalService>()) {
+    StreamingImportView::ServiceEntry entry;
+    entry.name = u"Tidal"_s;
+    entry.url_scheme = tidal->url_scheme();
+    entry.song_source = Song::Source::Tidal;
+    entry.page_source = new TidalPlaylistSource(&*tidal, app_->network(), streaming_view_);
+    entry.account = new TidalAccount(&*tidal, streaming_view_);
+    streaming_view_->AddService(entry);
+  }
 #endif
 #ifdef HAVE_QOBUZ
-    if (QobuzServicePtr qobuz = app_->streaming_services()->Service<QobuzService>()) {
-      PlaylistImportDialog::ServiceEntry entry;
-      entry.name = u"Qobuz"_s;
-      entry.url_scheme = qobuz->url_scheme();
-      entry.song_source = Song::Source::Qobuz;
-      entry.page_source = new QobuzPlaylistSource(&*qobuz, app_->network(), dialog);
-      entry.logged_in = [qobuz]() { return qobuz->authenticated(); };
-      entry.account_key = [qobuz]() { return qobuz->authenticated() ? QString::number(qobuz->user_id()) : QString(); };
-      dialog->AddService(entry);
-    }
+  if (QobuzServicePtr qobuz = app_->streaming_services()->Service<QobuzService>()) {
+    StreamingImportView::ServiceEntry entry;
+    entry.name = u"Qobuz"_s;
+    entry.url_scheme = qobuz->url_scheme();
+    entry.song_source = Song::Source::Qobuz;
+    entry.page_source = new QobuzPlaylistSource(&*qobuz, app_->network(), streaming_view_);
+    entry.account = new QobuzAccount(&*qobuz, streaming_view_);
+    streaming_view_->AddService(entry);
+  }
 #endif
 
-    dialog->SetSnapshotExistsFunction([this](const QString &identity) { return app_->playlist_manager()->HasSnapshot(identity); });
-    QObject::connect(dialog, &PlaylistImportDialog::SnapshotReady, this, [this, dialog](const QString &service_name, const QString &identity, const QString &playlist_name, const SongList &songs, const int skipped) {
-      Q_UNUSED(service_name)
-      bool replaced = false;
-      const int id = app_->playlist_manager()->ImportSnapshot(playlist_name, identity, songs, &replaced);
-      if (id < 0) return;
-      dialog->ShowImported(playlist_name, replaced, static_cast<int>(songs.count()), skipped);
-    });
-    playlist_import_dialog_ = dialog;
+  streaming_view_->SetSnapshotExistsFunction([this](const QString &identity) { return app_->playlist_manager()->HasSnapshot(identity); });
+  QObject::connect(streaming_view_, &StreamingImportView::SnapshotReady, this, [this](const QString &, const QString &identity, const QString &name, const SongList &songs, const int skipped) {
+    bool replaced = false;
+    const int id = app_->playlist_manager()->ImportSnapshot(name, identity, songs, &replaced);
+    if (id < 0) streaming_view_->ShowImportFailed(name, tr("The local playlist could not be created."));
+    else streaming_view_->ShowImported(name, replaced, static_cast<int>(songs.count()), skipped);
+  });
+  QObject::connect(streaming_view_, &StreamingImportView::BrowseServiceRequested, this, &MainWindow::RoomBrowseService);
+  QObject::connect(streaming_view_, &StreamingImportView::OpenSnapshotRequested, this, [this](const QString &identity) {
+    const int id = app_->playlist_manager()->FindSnapshotId(identity);
+    if (id < 0) return;
+    app_->playlist_manager()->SetCurrentOrOpen(id);
+    RoomPlaylistActivated(id);
+    room_->SetView(ListeningRoom::View::Playlists);
+  });
+  // Deliberately no navigation when a sign-in finishes: the user may be anywhere in the window, and the page updates itself. Only an explicit request opens the
+  // old settings page, from the advanced details of a problem.
+  QObject::connect(streaming_view_, &StreamingImportView::ServiceSettingsRequested, this, &MainWindow::RoomServiceSettings);
+
+  room_->SetStreamingWidget(streaming_view_);
+
+}
+
+void MainWindow::ShowStreamingAccount(const QString &service_key) {
+
+  BuildStreamingView();
+  // A catalog that was being browsed gives the page back, so the account is what the user sees.
+  room_->CloseCatalog();
+  room_->SetView(ListeningRoom::View::Streaming);
+  if (!service_key.isEmpty()) streaming_view_->SelectService(service_key);
+
+}
+
+void MainWindow::RoomAddMusic() {
+
+  Settings s;
+  s.beginGroup(CollectionSettings::kSettingsGroup);
+  QString path = s.value(CollectionSettings::kLastPath, StandardPaths::WritableLocation(StandardPaths::StandardLocation::MusicLocation)).toString();
+  s.endGroup();
+
+  path = QDir::cleanPath(QFileDialog::getExistingDirectory(this, tr("Add a music folder"), path));
+  if (path.isEmpty() || path == u"."_s) return;
+
+  const QByteArray filesystemtype = QStorageInfo(QFileInfo(path).canonicalFilePath()).fileSystemType();
+  if (kRejectedFileSystems.contains(filesystemtype)) {
+    QMessageBox::critical(this, tr("Invalid collection directory"), tr("Can't add directory %1 with special filesystem %2 to collection").arg(path, QString::fromUtf8(filesystemtype)));
+    return;
   }
 
-  if (service_key == "tidal"_L1) playlist_import_dialog_->SelectService(u"Tidal"_s);
-  else if (service_key == "qobuz"_L1) playlist_import_dialog_->SelectService(u"Qobuz"_s);
-  playlist_import_dialog_->show();
-  playlist_import_dialog_->raise();
-  playlist_import_dialog_->activateWindow();
+  s.beginGroup(CollectionSettings::kSettingsGroup);
+  s.setValue(CollectionSettings::kLastPath, path);
+  s.endGroup();
+
+  if (app_->collection()->model()->directory_model()->paths().contains(path)) {
+    room_->library()->NoteFolderAlreadyAdded(path);
+    return;
+  }
+  app_->collection()->backend()->AddDirectoryAsync(path);
+  room_->library()->NoteMusicAdded(path);
+
+}
+
+void MainWindow::OpenServiceAccountOrSettings(const Song::Source source) {
+
+  // Tidal and Qobuz have their account on the Streaming page; an unauthenticated view of theirs leads there instead of to the old settings window.
+  if (source == Song::Source::Tidal) ShowStreamingAccount(u"tidal"_s);
+  else if (source == Song::Source::Qobuz) ShowStreamingAccount(u"qobuz"_s);
+  else OpenServiceSettingsDialog(source);
 
 }
 
@@ -1885,7 +1949,7 @@ void MainWindow::SetupListeningRoom() {
   room_->library()->SetSource(library_source);
   QObject::connect(room_->library(), &LibraryView::PlayRequested, this, &MainWindow::RoomLibraryPlay);
   QObject::connect(room_->library(), &LibraryView::AddRequested, this, [this](const SongList &songs, const LibraryView::AddMode mode) { RoomLibraryAdd(songs, static_cast<int>(mode)); });
-  QObject::connect(room_->library(), &LibraryView::AddMusicRequested, this, &MainWindow::OpenCollectionSettingsDialog);
+  QObject::connect(room_->library(), &LibraryView::AddMusicRequested, this, &MainWindow::RoomAddMusic);
 
   // The reduced-motion preference is kept in the settings and applied now.
   {
@@ -1901,9 +1965,7 @@ void MainWindow::SetupListeningRoom() {
     s.endGroup();
   });
   QObject::connect(room_, &ListeningRoom::PlaylistActivated, this, &MainWindow::RoomPlaylistActivated);
-  QObject::connect(room_, &ListeningRoom::ImportPlaylistsRequested, this, [this](const QString &service_key) { ShowPlaylistImportDialog(service_key); });
-  QObject::connect(room_, &ListeningRoom::BrowseServiceRequested, this, &MainWindow::RoomBrowseService);
-  QObject::connect(room_, &ListeningRoom::ServiceSettingsRequested, this, &MainWindow::RoomServiceSettings);
+  QObject::connect(room_, &ListeningRoom::ImportPlaylistsRequested, this, [this](const QString &service_key) { ShowStreamingAccount(service_key); });
   QObject::connect(room_, &ListeningRoom::SettingsRequested, this, &MainWindow::OpenSettingsDialog);
   QObject::connect(room_, &ListeningRoom::SignalPathDetailsRequested, this, &MainWindow::ShowSignalPathDialog);
 
@@ -1931,6 +1993,7 @@ void MainWindow::SetupListeningRoom() {
   SyncRoomTransportActions();
   QObject::connect(room_, &ListeningRoom::ShowPlayingQueueRequested, this, &MainWindow::RoomShowPlayingQueue);
 
+  BuildStreamingView();
   RefreshRoomQueue();
   RefreshRoomPlaylists();
   RefreshRoomStreaming();

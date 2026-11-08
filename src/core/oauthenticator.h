@@ -76,7 +76,11 @@ class OAuthenticator : public QObject {
 
   QByteArray authorization_header() const;
 
+  // Starts a sign-in. Each call to Authenticate() of the authorization code flow is one interactive attempt with its own number (see attempt()).
+  // A new attempt abandons the one before it: its pending state, local redirect server and code exchange are dropped.
   void Authenticate();
+  // The number of the latest interactive attempt (0 before the first). Only InteractiveFinished() events carry it.
+  quint64 attempt() const { return attempt_; }
   // True from Authenticate() until the flow finished, failed or was cancelled.
   bool authentication_pending() const { return !state_.isEmpty(); }
   // The address that was opened in the browser for the pending sign-in, empty when none is pending.
@@ -112,7 +116,15 @@ class OAuthenticator : public QObject {
   void AuthorizationUrlReady(const QUrl &url, const bool opened);
   // The stored session was removed (logout, refused refresh token, expired grant).
   void SessionCleared();
+  // Reported for every sign-in outcome AND for background token refreshes (a refresh that succeeds or whose session is cleared). Callers that must tell
+  // their own interactive sign-in apart from a refresh use InteractiveFinished instead.
   void AuthenticationFinished(const bool success, const QString &error = QString(), const bool invalid_grant = false);
+  // The outcome of one interactive attempt, and only of that: the code exchange of attempt `attempt`, or a provider error returned for it.
+  // Background refreshes, callbacks of other attempts and callbacks that cannot be attributed to the pending attempt never produce it.
+  void InteractiveFinished(const quint64 attempt, const bool success, const QString &error = QString(), const bool invalid_grant = false);
+  // A browser reply was refused because it cannot be attributed to the pending sign-in (no sign-in waiting, wrong or missing state, a repeat of a callback
+  // that is already being exchanged). It never changes the pending sign-in. `reason` is plain text without any state or code.
+  void CallbackIgnored(const QString &reason);
 
  private Q_SLOTS:
   void RefreshLoginTimerTimeout();
@@ -139,6 +151,11 @@ class OAuthenticator : public QObject {
 
   QString state_;
   QUrl pending_authorize_url_;
+  quint64 attempt_ = 0;
+  // The attempt the reply being processed belongs to (0 for a background refresh).
+  quint64 finishing_attempt_ = 0;
+  void FinishInteractive(const bool success, const QString &error, const bool invalid_grant);
+  void AbandonAttempt();
 
   QString code_verifier_;
   QString code_challenge_;

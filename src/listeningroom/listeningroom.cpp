@@ -41,6 +41,7 @@
 #include <QPen>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScrollArea>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QStackedWidget>
@@ -335,22 +336,6 @@ class PlaylistCardDelegate : public QStyledItemDelegate {
   }
 };
 
-// A raised card for one streaming service.
-class CardFrame : public QWidget {
- public:
-  explicit CardFrame(QWidget *parent = nullptr) : QWidget(parent) {}
-
- protected:
-  void paintEvent(QPaintEvent *e) override {
-    Q_UNUSED(e)
-    QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
-    p.setPen(QPen(RoomStyle::Hairline(palette()), 1));
-    p.setBrush(RoomStyle::Surface(palette(), 0.05));
-    p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12);
-  }
-};
-
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------------------ nav button
@@ -537,8 +522,7 @@ ListeningRoom::ListeningRoom(QWidget *parent)
       playlists_list_(new QListWidget),
       button_playlists_import_(nullptr),
       label_playlists_empty_(nullptr),
-      streaming_cards_(new QWidget),
-      streaming_layout_(nullptr) {
+      streaming_host_(new QWidget) {
 
   setAccessibleName(tr("Adrift Listening Room"));
 
@@ -616,6 +600,17 @@ ListeningRoom::ListeningRoom(QWidget *parent)
   SetNowPlaying(RoomTrack());
   SetView(View::Listening);
   UpdateQueueHeader();
+
+}
+
+ListeningRoom::~ListeningRoom() {
+
+  // The hosted Streaming widget belongs to its creator (MainWindow, a test): give it back instead of letting the scroll area delete it.
+  if (streaming_scroll_ && streaming_widget_) {
+    streaming_scroll_->takeWidget();
+    streaming_widget_->setParent(nullptr);
+    streaming_widget_ = nullptr;
+  }
 
 }
 
@@ -887,41 +882,45 @@ void ListeningRoom::BuildStreamingPage() {
   layout->setContentsMargins(40, 32, 40, 20);
   layout->setSpacing(10);
 
-  QLabel *manual = MakeLabel(tr("Manual refresh"), false);
-  StyleLabel(manual, RoomStyle::Label(font()), ElidedLabel::Tone::Faint);
-  manual->setObjectName(QStringLiteral("manual_refresh"));
-  manual->setToolTip(tr("Imported playlists change only when you refresh them."));
-  AddPageHeader(layout, font(), tr("Streaming"), tr("Import playlists from your accounts. Refresh your local copies whenever you want."), manual);
+  AddPageHeader(layout, font(), tr("Streaming"), tr("Sign in, browse your favorites and import playlists. Imported playlists are local copies that you refresh yourself."));
 
-  streaming_layout_ = new QVBoxLayout(streaming_cards_);
-  streaming_layout_->setContentsMargins(0, 0, 0, 0);
-  streaming_layout_->setSpacing(12);
-  layout->addWidget(streaming_cards_);
+  // One page: the account, the playlists, and every problem are the hosted widget's (StreamingImportView); this is its place.
+  streaming_host_layout_ = new QVBoxLayout(streaming_host_);
+  streaming_host_layout_->setContentsMargins(0, 0, 0, 0);
+  streaming_host_layout_->setSpacing(0);
+  label_streaming_none_ = MakeLabel(tr("No streaming service is built into this version of Adrift."));
+  StyleLabel(label_streaming_none_, RoomStyle::Scaled(font(), 1.1), ElidedLabel::Tone::Muted);
+  label_streaming_none_->setVisible(false);
+  streaming_host_layout_->addWidget(label_streaming_none_);
 
-  // The account and import panel is hosted here, under the cards.
-  QWidget *panel_host = new QWidget;
-  panel_host->setObjectName(QStringLiteral("streaming_panel_host"));
-  panel_layout_ = new QVBoxLayout(panel_host);
-  panel_layout_->setContentsMargins(0, 8, 0, 0);
-  panel_layout_->setSpacing(0);
-  layout->addWidget(panel_host);
-  layout->addStretch(1);
+  // A long state (a problem with its technical details on a small window) scrolls instead of making the window taller than the screen.
+  streaming_scroll_ = new QScrollArea;
+  streaming_scroll_->setFrameShape(QFrame::NoFrame);
+  streaming_scroll_->setWidgetResizable(true);
+  streaming_scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  streaming_scroll_->setAutoFillBackground(false);
+  streaming_scroll_->viewport()->setAutoFillBackground(false);
+  streaming_scroll_->setAccessibleName(tr("Streaming"));
+  streaming_scroll_->setMinimumHeight(0);
+  streaming_host_layout_->addWidget(streaming_scroll_, 1);
+  layout->addWidget(streaming_host_, 1);
 
 }
 
-void ListeningRoom::SetStreamingPanel(QWidget *panel) {
+void ListeningRoom::SetStreamingWidget(QWidget *widget) {
 
-  if (streaming_panel_ == panel) return;
-  if (streaming_panel_) {
-    panel_layout_->removeWidget(streaming_panel_);
-    streaming_panel_->hide();
+  if (streaming_widget_ == widget) return;
+  if (streaming_widget_) {
+    // The scroll area would delete what it holds; the room does not own the widget, so it is taken out first.
+    streaming_scroll_->takeWidget();
+    streaming_widget_->hide();
   }
-  streaming_panel_ = panel;
-  if (panel) {
-    panel_layout_->addWidget(panel);
-    panel->show();
+  streaming_widget_ = widget;
+  if (widget) {
+    streaming_scroll_->setWidget(widget);
+    widget->show();
   }
-  SetView(View::Streaming);
+  label_streaming_none_->setVisible(!widget && !services_available_);
 
 }
 
@@ -1106,67 +1105,13 @@ void ListeningRoom::SetPlaylists(const QList<RoomPlaylistCard> &playlists) {
 
 void ListeningRoom::SetStreamingServices(const QList<RoomServiceCard> &services) {
 
-  services_ = services;
-  RebuildStreamingCards();
+  // The room only needs to know whether there is a service at all: the accounts themselves are the hosted widget's business.
+  services_available_ = !services.isEmpty();
+  label_streaming_none_->setVisible(!streaming_widget_ && !services_available_);
   // The import entry points only make sense when a service is available.
-  button_playlists_import_->setVisible(!services.isEmpty());
-  button_empty_import_->setVisible(!services.isEmpty());
+  button_playlists_import_->setVisible(services_available_);
+  button_empty_import_->setVisible(services_available_);
   button_streaming_->setVisible(true);
-
-}
-
-void ListeningRoom::RebuildStreamingCards() {
-
-  while (QLayoutItem *item = streaming_layout_->takeAt(0)) {
-    if (item->widget()) delete item->widget();
-    delete item;
-  }
-
-  if (services_.isEmpty()) {
-    QLabel *none = MakeLabel(tr("No streaming service is built into this version of Adrift."));
-    StyleLabel(none, RoomStyle::Scaled(font(), 1.1), ElidedLabel::Tone::Muted);
-    streaming_layout_->addWidget(none);
-    return;
-  }
-
-  for (const RoomServiceCard &service : std::as_const(services_)) {
-    CardFrame *card = new CardFrame;
-    card->setObjectName(QStringLiteral("service_%1").arg(service.key));
-    QHBoxLayout *row = new QHBoxLayout(card);
-    row->setContentsMargins(22, 18, 22, 18);
-    row->setSpacing(16);
-
-    QVBoxLayout *text = new QVBoxLayout;
-    text->setSpacing(2);
-    QLabel *name = MakeLabel(service.name, false);
-    StyleLabel(name, RoomStyle::Scaled(font(), 1.35, true), ElidedLabel::Tone::Normal);
-    QLabel *status = MakeLabel(service.status, false);
-    StyleLabel(status, font(), service.signed_in ? ElidedLabel::Tone::Accent : ElidedLabel::Tone::Muted);
-    status->setObjectName(QStringLiteral("status"));
-    text->addWidget(name);
-    text->addWidget(status);
-    row->addLayout(text, 1);
-
-    const QString key = service.key;
-    RoomButton *browse = new RoomButton(tr("Browse favorites"));
-    RoomButton *import = new RoomButton(tr("Import playlists…"), true);
-    RoomButton *settings = new RoomButton(service.signed_in ? tr("Account settings") : tr("Sign in…"));
-    browse->setObjectName(QStringLiteral("browse"));
-    import->setObjectName(QStringLiteral("import"));
-    settings->setObjectName(QStringLiteral("settings"));
-    browse->setEnabled(service.signed_in);
-    import->setEnabled(service.signed_in);
-    browse->setAccessibleName(tr("Browse %1 favorites").arg(service.name));
-    import->setAccessibleName(tr("Import playlists from %1").arg(service.name));
-    settings->setAccessibleName(tr("%1 account settings").arg(service.name));
-    QObject::connect(browse, &QPushButton::clicked, this, [this, key]() { Q_EMIT BrowseServiceRequested(key); });
-    QObject::connect(import, &QPushButton::clicked, this, [this, key]() { Q_EMIT ImportPlaylistsRequested(key); });
-    QObject::connect(settings, &QPushButton::clicked, this, [this, key]() { Q_EMIT ServiceSettingsRequested(key); });
-    row->addWidget(browse);
-    row->addWidget(import);
-    row->addWidget(settings);
-    streaming_layout_->addWidget(card);
-  }
 
 }
 

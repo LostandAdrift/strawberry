@@ -42,7 +42,7 @@ class QobuzAccount : public AccountBackend {
   QString signin_help() const override;
   QUrl pending_url() const override;
   bool SaveSetup(const QMap<QString, QString> &values, QString *error) override;
-  void StartSignIn() override;
+  void StartSignIn(const quint64 attempt) override;
   void CancelSignIn() override;
   void SignOut() override;
 

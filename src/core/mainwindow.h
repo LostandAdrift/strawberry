@@ -81,7 +81,7 @@ class Equalizer;
 class ErrorDialog;
 class SignalPathDialog;
 class ListeningRoom;
-class PlaylistImportDialog;
+class StreamingImportView;
 class FileView;
 class GlobalShortcutsManager;
 class MimeData;
@@ -207,7 +207,13 @@ class MainWindow : public QMainWindow, public PlatformInterface {
   void SongChanged(const Song &song);
   void UpdateSignalPath();
   void ShowSignalPathDialog();
-  void ShowPlaylistImportDialog(const QString &service_key = QString());
+  void BuildStreamingView();
+  // Shows the Streaming page (inside this window) for a service: account, playlists, import. Navigation only; it never opens a window.
+  void ShowStreamingAccount(const QString &service_key = QString());
+  // Add music: a normal folder picker, then the same collection workflow as the settings page (the backend adds the directory and the watcher scans it).
+  void RoomAddMusic();
+  // Where an unauthenticated service view sends the user: the inline account for Tidal and Qobuz, the old settings page for every other service.
+  void OpenServiceAccountOrSettings(const Song::Source source);
   void SetupListeningRoom();
   void ScheduleRoomRefresh();
   void RefreshRoomQueue();
@@ -218,7 +224,7 @@ class MainWindow : public QMainWindow, public PlatformInterface {
   void RoomShowPlayingQueue();
   void SyncRoomTransportActions();
   void RoomBrowseService(const QString &key);
-  void RoomServiceSettings(const QString &key);
+  void RoomServiceSettings(const QString &key);  // advanced only: the old settings page of a service
   void RoomLibraryPlay(const SongList &songs, const int start_index);
   void RoomLibraryAdd(const SongList &songs, const int mode);
   void RoomCatalogClosed();
@@ -382,7 +388,7 @@ class MainWindow : public QMainWindow, public PlatformInterface {
 
   Lazy<SettingsDialog> settings_dialog_;
   SignalPathDialog *signal_path_dialog_ = nullptr;
-  PlaylistImportDialog *playlist_import_dialog_ = nullptr;
+  StreamingImportView *streaming_view_ = nullptr;
   ListeningRoom *room_ = nullptr;
   QTimer *room_refresh_timer_ = nullptr;
   bool room_playback_active_ = false;

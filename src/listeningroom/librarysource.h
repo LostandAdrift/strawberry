@@ -26,6 +26,7 @@
 #include <QImage>
 #include <QList>
 #include <QObject>
+#include <QPointer>
 #include <QString>
 #include <QUrl>
 
@@ -93,7 +94,7 @@ class CollectionLibrarySource : public LibrarySource {
   void AlbumCoverLoaded(const quint64 loader_id, const AlbumCoverLoaderResult &result);
 
  private:
-  CollectionBackend *backend_;
+  QPointer<CollectionBackend> backend_;
   SharedPtr<AlbumCoverLoader> cover_loader_;
   QHash<quint64, quint64> pending_;  // loader task id -> request id
 };

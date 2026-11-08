@@ -501,20 +501,23 @@ TEST_F(MotionTest, ACatalogIsShownOnTheStreamingPageInsideTheWindowWithAWayBack)
 
 }
 
-TEST_F(MotionTest, TheAccountAndImportPanelHasAHomeOnTheStreamingPage) {
+TEST_F(MotionTest, TheStreamingPageHostsItsWidgetWithoutStealingNavigation) {
 
   ListeningRoom room;
   ShowAt(room, 1440, 900);
+  room.SetView(ListeningRoom::View::Listening);
 
-  QLabel panel(QStringLiteral("account and import panel"));
-  room.SetStreamingPanel(&panel);
-  EXPECT_EQ(ListeningRoom::View::Streaming, room.view());
+  // Setting the page widget (at start-up, or when something asynchronous finishes) only gives it its place. The user stays where they are.
+  QLabel panel(QStringLiteral("account and import page"));
+  room.SetStreamingWidget(&panel);
+  EXPECT_EQ(ListeningRoom::View::Listening, room.view());
+  EXPECT_FALSE(panel.isVisible());
+  room.SetView(ListeningRoom::View::Streaming);
   EXPECT_TRUE(panel.isVisible());
   EXPECT_TRUE(room.page(ListeningRoom::View::Streaming)->isAncestorOf(&panel));
-  EXPECT_EQ(&panel, room.streaming_panel());
 
-  room.SetStreamingPanel(nullptr);
+  room.SetStreamingWidget(nullptr);
   EXPECT_FALSE(panel.isVisible());
-  EXPECT_EQ(nullptr, room.streaming_panel());
+  EXPECT_EQ(nullptr, room.streaming_widget());
 
 }

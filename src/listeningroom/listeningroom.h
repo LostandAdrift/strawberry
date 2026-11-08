@@ -36,6 +36,7 @@
 
 class QBoxLayout;
 class QLabel;
+class QScrollArea;
 class QStackedLayout;
 class QListWidget;
 class QEnterEvent;
@@ -138,6 +139,7 @@ class ListeningRoom : public QWidget {
   };
 
   explicit ListeningRoom(QWidget *parent = nullptr);
+  ~ListeningRoom() override;
 
   // Which playlist the queue shows. This is the rule MainWindow applies every time playlists or playback change.
   struct QueueChoice {
@@ -201,9 +203,10 @@ class ListeningRoom : public QWidget {
   QWidget *catalog_widget() const { return catalog_widget_; }
   bool catalog_visible() const;
   QPushButton *catalog_back_button() const { return button_catalog_back_; }
-  // The panel the account and import flow lives in: shown on the Streaming page below the service cards, in this window. The room does not own it.
-  void SetStreamingPanel(QWidget *panel);
-  QWidget *streaming_panel() const { return streaming_panel_; }
+  // The widget the Streaming page is made of (accounts, playlist import, every failure, all inline): the room only gives it its place under the page heading.
+  // The room does not own it.
+  void SetStreamingWidget(QWidget *widget);
+  QWidget *streaming_widget() const { return streaming_widget_; }
 
   // Motion. The preference itself is global (RoomMotion); the room only offers the control and tells the application when the user changes it.
   void SetReducedMotion(const bool reduced);
@@ -224,7 +227,6 @@ class ListeningRoom : public QWidget {
   QPushButton *empty_import_button() const { return button_empty_import_; }
   QPushButton *playlists_import_button() const { return button_playlists_import_; }
   QWidget *page(const View view) const;
-  QWidget *streaming_cards() const { return streaming_cards_; }
   const RoomTrack &track() const { return track_; }
 
   // The responsive layout (compact rail, queue beside or below the cover) is decided from the real size just before the room is shown.
@@ -238,8 +240,6 @@ class ListeningRoom : public QWidget {
   void QueueRowActivated(const int row);
   void PlaylistActivated(const int playlist_id);
   void ImportPlaylistsRequested(const QString &service_key);
-  void BrowseServiceRequested(const QString &service_key);
-  void ServiceSettingsRequested(const QString &service_key);
   void SettingsRequested();
   void SignalPathDetailsRequested();
   void ReducedMotionChanged(const bool reduced);
@@ -260,7 +260,6 @@ class ListeningRoom : public QWidget {
   void RetargetRailIndicator();
   void UpdateNowPlayingTexts();
   void UpdateQueueHeader();
-  void RebuildStreamingCards();
 
   View view_;
   bool compact_;
@@ -318,8 +317,11 @@ class ListeningRoom : public QWidget {
   QLabel *label_playlists_empty_;
 
   // Streaming page
-  QWidget *streaming_cards_;
-  QVBoxLayout *streaming_layout_;
+  QWidget *streaming_host_;
+  QScrollArea *streaming_scroll_ = nullptr;
+  QVBoxLayout *streaming_host_layout_ = nullptr;
+  QLabel *label_streaming_none_ = nullptr;
+  bool services_available_ = false;
   QStackedLayout *streaming_stack_ = nullptr;
   QWidget *streaming_main_ = nullptr;
   QWidget *streaming_catalog_page_ = nullptr;
@@ -327,8 +329,7 @@ class ListeningRoom : public QWidget {
   QPushButton *button_catalog_back_ = nullptr;
   QLabel *label_catalog_title_ = nullptr;
   QWidget *catalog_widget_ = nullptr;
-  QVBoxLayout *panel_layout_ = nullptr;
-  QWidget *streaming_panel_ = nullptr;
+  QWidget *streaming_widget_ = nullptr;
 };
 
 Q_DECLARE_METATYPE(ListeningRoom::View)

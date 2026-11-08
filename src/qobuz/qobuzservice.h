@@ -84,6 +84,8 @@ class QobuzService : public StreamingService {
   bool has_app_credentials() const { return !app_id_.isEmpty() && !app_secret_.isEmpty() && !private_key_.isEmpty(); }
   bool authentication_pending() const;
   QUrl pending_sign_in_url() const { return pending_sign_in_url_; }
+  // The number of the latest interactive attempt; Authenticate() starts a new one.
+  quint64 attempt() const { return attempt_; }
   void CancelAuthentication();
   // Stores the developer app credentials the user entered and applies them.
   void SaveAppCredentials(const QString &app_id, const QString &app_secret, const QString &private_key);
@@ -128,6 +130,8 @@ class QobuzService : public StreamingService {
   void SessionChanged();
   // The browser address for the sign-in in progress. `opened` is false when the desktop could not start a browser.
   void AuthorizationLinkReady(const QUrl &url, const bool opened);
+  // The outcome of one interactive sign-in attempt (the number Authenticate() started), and only of that.
+  void InteractiveLoginFinished(const quint64 attempt, const bool success, const QString &error);
 
  public Q_SLOTS:
   void Authenticate();
@@ -203,6 +207,7 @@ class QobuzService : public StreamingService {
   qint64 user_id_;
   QString user_auth_token_;
   QUrl pending_sign_in_url_;
+  quint64 attempt_ = 0;
 
   int pending_search_id_;
   int next_pending_search_id_;

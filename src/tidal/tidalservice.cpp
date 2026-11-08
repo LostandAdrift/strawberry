@@ -135,6 +135,9 @@ TidalService::TidalService(const SharedPtr<TaskManager> task_manager,
 
   QObject::connect(oauth_, &OAuthenticator::AuthenticationFinished, this, &TidalService::OAuthFinished);
   QObject::connect(oauth_, &OAuthenticator::AuthorizationUrlReady, this, &TidalService::AuthorizationLinkReady);
+  QObject::connect(oauth_, &OAuthenticator::InteractiveFinished, this, [this](const quint64 attempt, const bool success, const QString &error) { Q_EMIT InteractiveLoginFinished(attempt, success, error); });
+  // A reply that cannot be attributed to the pending sign-in is only noted here: it must not end a sign-in that is running now.
+  QObject::connect(oauth_, &OAuthenticator::CallbackIgnored, this, [](const QString &reason) { qLog(Debug) << "Tidal: ignored a browser reply:" << reason; });
   QObject::connect(oauth_, &OAuthenticator::SessionCleared, this, &TidalService::SessionChanged);
 
   // Backends
@@ -303,10 +306,11 @@ void TidalService::ReloadSettings() {
 
 }
 
-void TidalService::StartAuthorization(const QString &client_id) {
+quint64 TidalService::StartAuthorization(const QString &client_id) {
 
   oauth_->set_client_id(client_id);
   oauth_->Authenticate();
+  return oauth_->attempt();
 
 }
 

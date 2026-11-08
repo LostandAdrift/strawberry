@@ -148,6 +148,44 @@ TEST(LibraryViewTest, EmptyLibraryHasAUsefulStateWithAddMusic) {
 
 }
 
+TEST(LibraryViewTest, AddingAFolderSaysItIsBeingReadAndGivesWayToTheAlbumsWhenTheyArrive) {
+
+  FakeLibrarySource source(0);
+  LibraryView view;
+  view.SetSource(&source);
+  ShowAndLoad(view);
+  ASSERT_EQ(LibraryView::State::Empty, view.state());
+
+  // The host started reading a folder: the empty page must not look broken while the scan has found nothing yet.
+  view.NoteMusicAdded(QStringLiteral("/home/example/Music"));
+  EXPECT_EQ(LibraryView::State::Empty, view.state());
+  EXPECT_TRUE(view.notice()->title_label()->text().contains(QStringLiteral("Reading")));
+  EXPECT_TRUE(view.notice()->hint_label()->text().contains(QStringLiteral("/home/example/Music")));
+  EXPECT_TRUE(view.summary_label()->text().contains(QStringLiteral("Reading")));
+  EXPECT_EQ(!RoomMotion::Instance()->reduced(), view.notice()->timer_active());
+
+  // The scan finds music: the collection reports it, the page reloads once and shows the albums, and the note is gone.
+  source.Generate(6);
+  Q_EMIT source.Changed();
+  QTRY_VERIFY_WITH_TIMEOUT(view.album_count() == 6, 5000);
+  EXPECT_EQ(LibraryView::State::Browsing, view.state());
+  EXPECT_TRUE(view.adding_folder().isEmpty());
+  EXPECT_FALSE(view.summary_label()->text().contains(QStringLiteral("Reading")));
+
+}
+
+TEST(LibraryViewTest, AddingAFolderThatIsAlreadyThereSaysSo) {
+
+  FakeLibrarySource source(0);
+  LibraryView view;
+  view.SetSource(&source);
+  ShowAndLoad(view);
+  view.NoteFolderAlreadyAdded(QStringLiteral("/home/example/Music"));
+  EXPECT_TRUE(view.notice()->hint_label()->text().contains(QStringLiteral("already part of your library")));
+  EXPECT_TRUE(view.adding_folder().isEmpty());
+
+}
+
 TEST(LibraryViewTest, ARecordTurnsOnlyWhileTheLoadingNoticeIsVisible) {
 
   FakeLibrarySource source(8);

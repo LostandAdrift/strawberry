@@ -167,6 +167,14 @@ LibraryView::LibraryView(QWidget *parent) : QWidget(parent), search_timer_(new Q
   reload_timer_->setInterval(600);
   QObject::connect(search_timer_, &QTimer::timeout, this, &LibraryView::ApplySearch);
   QObject::connect(reload_timer_, &QTimer::timeout, this, &LibraryView::Reload);
+  adding_timer_ = new QTimer(this);
+  adding_timer_->setSingleShot(true);
+  adding_timer_->setInterval(2 * 60 * 1000);
+  QObject::connect(adding_timer_, &QTimer::timeout, this, [this]() {
+    adding_folder_.clear();
+    UpdateSummary();
+    if (state_ == State::Empty) SetState(State::Empty);
+  });
 
   BuildUi();
   SetState(State::Loading);
@@ -420,8 +428,12 @@ void LibraryView::SetState(const State state) {
   mode_switch_->setVisible(state == State::Browsing || state == State::NoMatches);
   Q_UNUSED(browsing)
   button_add_music_->setVisible(state != State::Album);
-  if (state == State::Empty) {
-    notice_->SetContent(tr("Your library is empty"), tr("Add the folders where your music lives and Adrift will gather it here. Nothing is moved or changed."), tr("Add music…"), tr("Connect a streaming service"));
+  if (state == State::Empty && !adding_folder_.isEmpty()) {
+    notice_->SetContent(tr("Reading your music…"), tr("Adrift is looking through “%1”. Albums appear here as they are found; nothing in the folder is changed.").arg(adding_folder_), tr("Add another folder…"), tr("Connect a streaming service"));
+    notice_->SetSpinning(true);
+  }
+  else if (state == State::Empty) {
+    notice_->SetContent(tr("Your library is empty"), already_added_folder_.isEmpty() ? tr("Add the folders where your music lives and Adrift will gather it here. Nothing is moved or changed.") : tr("“%1” is already part of your library, and it has no music Adrift can read yet.").arg(already_added_folder_), tr("Add music…"), tr("Connect a streaming service"));
     notice_->SetSpinning(false);
   }
   else if (state == State::NoMatches) {
@@ -438,12 +450,13 @@ void LibraryView::UpdateSummary() {
   QString text;
   switch (state_) {
     case State::Loading:   text = tr("Reading your library…"); break;
-    case State::Empty:     text = tr("No music yet."); break;
+    case State::Empty:     text = adding_folder_.isEmpty() ? tr("No music yet.") : tr("Reading “%1”…").arg(adding_folder_); break;
     case State::NoMatches: text = tr("No matches."); break;
     case State::Browsing:
       if (!artist_filter_.isEmpty()) text = tr("%1 by %2").arg(Albums(album_model_->rowCount()), artist_filter_);
       else if (!search_->text().trimmed().isEmpty()) text = tr("%1 match “%2”").arg(Albums(album_model_->rowCount()), search_->text().trimmed());
       else text = QStringLiteral("%1 · %2").arg(Albums(static_cast<int>(all_.count())), Artists(artist_count()));
+      if (!adding_folder_.isEmpty()) text += tr(" · reading “%1”").arg(adding_folder_);
       break;
     case State::Album:
       text = tr("Album");
@@ -507,6 +520,8 @@ void LibraryView::StartLoad() {
       if (!self || self->destroying_ || generation != self->load_generation_) return;
       self->loading_ = false;
       self->loaded_ = true;
+      // Music arrived: the "reading this folder" note has done its job once the library has more than it had.
+      if (!self->adding_folder_.isEmpty() && list.count() > self->all_.count()) self->adding_folder_.clear();
       self->all_ = list;
       self->remote_matches_.clear();
       self->remote_text_.clear();
@@ -670,6 +685,24 @@ void LibraryView::RefreshShown() {
 }
 
 // ------------------------------------------------------------------------------------------------------------ one album
+
+void LibraryView::NoteMusicAdded(const QString &folder) {
+
+  adding_folder_ = folder;
+  already_added_folder_.clear();
+  adding_timer_->start();
+  // The scan reports songs as it finds them; each report reloads once (coalesced).
+  UpdateSummary();
+  if (state_ == State::Empty) SetState(State::Empty);
+
+}
+
+void LibraryView::NoteFolderAlreadyAdded(const QString &folder) {
+
+  already_added_folder_ = folder;
+  if (state_ == State::Empty) SetState(State::Empty);
+
+}
 
 void LibraryView::OpenAlbum(const LibraryAlbum &album) {
 

@@ -61,7 +61,6 @@
 #include "engine/directalsa.h"
 #include "engine/signalpath.h"
 #include "streaming/playlistimport.h"
-#include "streaming/playlistimportdialog.h"
 #include "widgets/signalpathwidget.h"
 
 #ifndef ADRIFT_SCREENSHOT_DIR
@@ -254,57 +253,6 @@ QWidget *ControlSheet(const Theme &theme) {
 
 }
 
-class ScriptedSource : public PlaylistImport::PageSource {
- public:
-  using Responder = std::function<PlaylistImport::PageResult(const bool tracks, const int offset)>;
-  PlaylistImport::Service service() const override { return PlaylistImport::Service::Tidal; }
-  void RequestPlaylists(const int offset, const int) override { Enqueue(false, offset); }
-  void RequestTracks(const QString &, const int offset, const int) override { Enqueue(true, offset); }
-  void Cancel() override { ++generation_; }
-  Responder responder;
-  bool hold = false;
-
- private:
-  void Enqueue(const bool tracks, const int offset) {
-    if (hold) return;
-    const quint64 generation = generation_;
-    QMetaObject::invokeMethod(this, [this, tracks, offset, generation]() {
-      if (generation == generation_) Q_EMIT PageReady(responder(tracks, offset));
-    }, Qt::QueuedConnection);
-  }
-  quint64 generation_ = 0;
-};
-
-QJsonObject PlaylistsJson() {
-  QJsonArray items;
-  const QList<QPair<QString, int>> lists = { { QStringLiteral("Late night drive"), 42 }, { QStringLiteral("Focus: deep work"), 118 }, { QStringLiteral("Rainy Sunday"), 27 }, { QStringLiteral("Live at Montreux"), 9 } };
-  int i = 0;
-  for (const auto &list : lists) {
-    items.append(QJsonObject{ { QStringLiteral("uuid"), QStringLiteral("pl-%1").arg(i++) }, { QStringLiteral("title"), list.first }, { QStringLiteral("numberOfTracks"), list.second } });
-  }
-  return QJsonObject{ { QStringLiteral("offset"), 0 }, { QStringLiteral("totalNumberOfItems"), static_cast<int>(lists.size()) }, { QStringLiteral("items"), items } };
-}
-
-bool WaitFor(const std::function<bool()> &predicate, const int timeout_ms = 5000) {
-  QElapsedTimer timer;
-  timer.start();
-  while (!predicate()) {
-    if (timer.elapsed() > timeout_ms) return false;
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-  }
-  return true;
-}
-
-PlaylistImportDialog::ServiceEntry EntryFor(ScriptedSource *source) {
-  PlaylistImportDialog::ServiceEntry entry;
-  entry.name = QStringLiteral("Tidal");
-  entry.url_scheme = QStringLiteral("tidal");
-  entry.song_source = Song::Source::Tidal;
-  entry.page_source = source;
-  entry.logged_in = []() { return true; };
-  return entry;
-}
-
 class RenderTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -397,71 +345,6 @@ TEST_F(RenderTest, SignalPathDialog) {
   expanded.SetReport(Mp3WithDsp());
   expanded.details_toggle()->setChecked(true);
   Save(Render(&expanded), QStringLiteral("signalpath_dialog_details_expanded"));
-
-}
-
-TEST_F(RenderTest, PlaylistImportDialogStates) {
-
-  const Theme theme = Themes()[1];
-
-  // Empty / not loaded yet
-  {
-    ScriptedSource source;
-    PlaylistImportDialog dialog;
-    dialog.setPalette(PaletteFor(theme));
-    dialog.AddService(EntryFor(&source));
-    Save(Render(&dialog, QSize(520, 460)), QStringLiteral("playlist_import_empty"));
-  }
-
-  // Loaded list with a selection and an existing snapshot (button reads "Refresh snapshot")
-  {
-    ScriptedSource source;
-    source.responder = [](const bool, const int) {
-      PlaylistImport::PageResult result;
-      result.ok = true;
-      result.json = PlaylistsJson();
-      return result;
-    };
-    PlaylistImportDialog dialog;
-    dialog.setPalette(PaletteFor(theme));
-    dialog.SetSnapshotExistsFunction([](const QString &identity) { return identity == QStringLiteral("tidal:pl-1"); });
-    dialog.AddService(EntryFor(&source));
-    dialog.load_button()->click();
-    ASSERT_TRUE(WaitFor([&dialog]() { return !dialog.loading() && dialog.playlist_list()->count() == 4; }));
-    dialog.playlist_list()->setCurrentRow(1);
-    EXPECT_EQ(QStringLiteral("Refresh snapshot"), dialog.import_button()->text());
-    Save(Render(&dialog, QSize(520, 460)), QStringLiteral("playlist_import_loaded"));
-  }
-
-  // Loading in progress (controls disabled, cancel enabled)
-  {
-    ScriptedSource source;
-    source.hold = true;
-    PlaylistImportDialog dialog;
-    dialog.setPalette(PaletteFor(theme));
-    dialog.AddService(EntryFor(&source));
-    dialog.load_button()->click();
-    EXPECT_TRUE(dialog.loading());
-    Save(Render(&dialog, QSize(520, 460)), QStringLiteral("playlist_import_loading"));
-  }
-
-  // Error (expired login)
-  {
-    ScriptedSource source;
-    source.responder = [](const bool, const int) {
-      PlaylistImport::PageResult result;
-      result.ok = false;
-      result.http_status = 401;
-      return result;
-    };
-    PlaylistImportDialog dialog;
-    dialog.setPalette(PaletteFor(theme));
-    dialog.AddService(EntryFor(&source));
-    dialog.load_button()->click();
-    ASSERT_TRUE(WaitFor([&dialog]() { return !dialog.loading(); }));
-    EXPECT_TRUE(dialog.status_label()->text().startsWith(QStringLiteral("Error:")));
-    Save(Render(&dialog, QSize(520, 460)), QStringLiteral("playlist_import_error"));
-  }
 
 }
 
