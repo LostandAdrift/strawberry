@@ -24,6 +24,8 @@
 #include <QCoreApplication>
 #include <QImage>
 #include <QMetaObject>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QPointer>
 #include <QSize>
 #include <QThread>
@@ -37,20 +39,37 @@
 #include "covermanager/albumcoverloaderoptions.h"
 #include "covermanager/albumcoverloaderresult.h"
 
+struct CollectionLibrarySource::Mailbox {
+  QMutex mutex;
+  CollectionLibrarySource *owner = nullptr;
+
+  // Queues `function` on the source's (GUI) thread unless the source is gone. Posting never blocks, so holding the lock here is cheap.
+  void Post(std::function<void()> function) {
+    QMutexLocker lock(&mutex);
+    if (owner) QMetaObject::invokeMethod(owner, std::move(function), Qt::QueuedConnection);
+  }
+};
+
 namespace {
 
-// The database is read where the backend lives. The backend has its own long-lived thread with its own database connection; a short-lived worker
-// must not open connections of its own (thread pool threads come and go). The worker waits for the answer, the GUI thread never does.
-template<typename Function>
-auto OnBackendThread(QObject *backend, Function function) -> decltype(function()) {
+// One request to the backend's thread. It answers exactly once: with the read, or with the failure when it is destroyed without having run (the backend
+// or its event loop is gone, so the queued call is dropped). Nothing waits for the backend's thread, and nothing is leaked or retried.
+class Job {
+ public:
+  Job(SharedPtr<CollectionLibrarySource::Mailbox> mailbox, std::function<std::function<void()>()> read, std::function<void()> fail) : mailbox_(mailbox), read_(std::move(read)), fail_(std::move(fail)) {}
+  ~Job() { if (!done_) mailbox_->Post(std::move(fail_)); }
 
-  using Result = decltype(function());
-  if (!backend || QThread::currentThread() == backend->thread()) return function();
-  Result result{};
-  QMetaObject::invokeMethod(backend, [&result, &function]() { result = function(); }, Qt::BlockingQueuedConnection);
-  return result;
+  void Run() {
+    done_ = true;
+    mailbox_->Post(read_());
+  }
 
-}
+ private:
+  SharedPtr<CollectionLibrarySource::Mailbox> mailbox_;
+  std::function<std::function<void()>()> read_;
+  std::function<void()> fail_;
+  bool done_ = false;
+};
 
 }  // namespace
 
@@ -58,7 +77,9 @@ QString LibraryAlbum::ArtistLabel() const {
   return artist.isEmpty() ? QCoreApplication::translate("LibraryView", "Various artists") : artist;
 }
 
-CollectionLibrarySource::CollectionLibrarySource(CollectionBackend *backend, SharedPtr<AlbumCoverLoader> cover_loader, QObject *parent) : LibrarySource(parent), backend_(backend), cover_loader_(cover_loader) {
+CollectionLibrarySource::CollectionLibrarySource(CollectionBackend *backend, SharedPtr<AlbumCoverLoader> cover_loader, QObject *parent) : LibrarySource(parent), backend_(backend), mailbox_(std::make_shared<Mailbox>()), cover_loader_(cover_loader) {
+
+  mailbox_->owner = this;
 
   if (backend_) {
     QObject::connect(backend_, &CollectionBackend::SongsAdded, this, &LibrarySource::Changed);
@@ -72,45 +93,65 @@ CollectionLibrarySource::CollectionLibrarySource(CollectionBackend *backend, Sha
 
 }
 
-LibraryAlbumList CollectionLibrarySource::LoadAlbums(const QString &filter_text) {
+CollectionLibrarySource::~CollectionLibrarySource() {
 
-  LibraryAlbumList albums;
-  if (!backend_) return albums;
+  // From here on no answer is delivered to this object, whichever thread tries.
+  QMutexLocker lock(&mailbox_->mutex);
+  mailbox_->owner = nullptr;
+
+}
+
+void CollectionLibrarySource::Run(std::function<std::function<void()>()> read, std::function<void()> fail) {
+
+  // The queued call holds the job; if the call is dropped (the backend was deleted, its thread is gone) the job's destructor reports the failure.
+  auto job = std::make_shared<Job>(mailbox_, std::move(read), std::move(fail));
+  CollectionBackend *backend = backend_;
+  QThread *thread = backend ? backend->thread() : nullptr;
+  if (!thread || !thread->isRunning()) return;  // the job dies here and reports the failure
+  QMetaObject::invokeMethod(backend, [job]() { job->Run(); }, Qt::QueuedConnection);
+
+}
+
+void CollectionLibrarySource::RequestAlbums(const quint64 id, const QString &filter_text) {
 
   CollectionFilterOptions options;
   if (!filter_text.trimmed().isEmpty()) options.set_filter_text(filter_text.trimmed());
 
-  // The lambda holds the backend by guarded pointer, not this source: if the source or the backend goes away while the read waits for the backend's thread,
-  // nothing dangling is touched.
+  // The work holds the backend by guarded pointer and the source only through the mailbox: whichever goes away first, nothing dangling is touched.
   const QPointer<CollectionBackend> backend = backend_;
-  const CollectionBackend::AlbumList list = OnBackendThread(backend_, [backend, &options]() { return backend ? backend->GetAllAlbums(options) : CollectionBackend::AlbumList(); });
-  albums.reserve(list.count());
-  for (const CollectionBackend::Album &item : list) {
-    LibraryAlbum album;
-    album.artist = item.album_artist;
-    album.album = item.album;
-    album.art_embedded = item.art_embedded;
-    album.art_unset = item.art_unset;
-    album.art_automatic = item.art_automatic;
-    album.art_manual = item.art_manual;
-    if (!item.urls.isEmpty()) album.first_url = item.urls.first();
-    albums << album;
-  }
-  return albums;
+  Run([this, backend, options, id]() -> std::function<void()> {
+    // On the backend's thread: it has its own long-lived database connection, which is why the read happens here.
+    const CollectionBackend::AlbumList list = backend ? backend->GetAllAlbums(options) : CollectionBackend::AlbumList();
+    LibraryAlbumList albums;
+    albums.reserve(list.count());
+    for (const CollectionBackend::Album &item : list) {
+      LibraryAlbum album;
+      album.artist = item.album_artist;
+      album.album = item.album;
+      album.art_embedded = item.art_embedded;
+      album.art_unset = item.art_unset;
+      album.art_automatic = item.art_automatic;
+      album.art_manual = item.art_manual;
+      if (!item.urls.isEmpty()) album.first_url = item.urls.first();
+      albums << album;
+    }
+    return [this, id, albums]() { Q_EMIT AlbumsLoaded(id, albums, true); };
+  }, [this, id]() { Q_EMIT AlbumsLoaded(id, LibraryAlbumList(), false); });
 
 }
 
-SongList CollectionLibrarySource::LoadTracks(const LibraryAlbum &album) {
+void CollectionLibrarySource::RequestTracks(const quint64 id, const LibraryAlbum &album) {
 
-  if (!backend_) return SongList();
   const QPointer<CollectionBackend> backend = backend_;
-  SongList songs = OnBackendThread(backend_, [backend, &album]() { return !backend ? SongList() : (album.artist.isEmpty() ? backend->GetCompilationSongs(album.album) : backend->GetAlbumSongs(album.artist, album.album)); });
-  // Disc, then track number: the order of the record, whatever order the database returned.
-  std::stable_sort(songs.begin(), songs.end(), [](const Song &a, const Song &b) {
-    if (a.disc() != b.disc()) return a.disc() < b.disc();
-    return a.track() < b.track();
-  });
-  return songs;
+  Run([this, backend, album, id]() -> std::function<void()> {
+    SongList songs = !backend ? SongList() : (album.artist.isEmpty() ? backend->GetCompilationSongs(album.album) : backend->GetAlbumSongs(album.artist, album.album));
+    // Disc, then track number: the order of the record, whatever order the database returned.
+    std::stable_sort(songs.begin(), songs.end(), [](const Song &a, const Song &b) {
+      if (a.disc() != b.disc()) return a.disc() < b.disc();
+      return a.track() < b.track();
+    });
+    return [this, id, songs]() { Q_EMIT TracksLoaded(id, songs, true); };
+  }, [this, id]() { Q_EMIT TracksLoaded(id, SongList(), false); });
 
 }
 

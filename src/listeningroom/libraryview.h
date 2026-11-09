@@ -23,13 +23,13 @@
 #include "config.h"
 
 #include <functional>
+#include <map>
 
 #include <QHash>
 #include <QList>
 #include <QPointer>
 #include <QSize>
 #include <QString>
-#include <QThreadPool>
 #include <QTimer>
 #include <QVariant>
 #include <QWidget>
@@ -58,8 +58,8 @@ class RoomSegmented;
 // It shows the one collection the application already has (through a LibrarySource); it keeps no store of its own. Everything it does to the playlists
 // is a request (PlayRequested, AddRequested) that MainWindow carries out with the existing playlist manager, so this widget has no dependency on the application.
 //
-// Nothing here blocks the GUI thread on the database: albums, search results and tracks are read on a worker thread, and a result that arrives after something
-// newer was asked (another search, another album, the widget being destroyed) is dropped.
+// Nothing here waits for anything: the source answers asynchronously (by request id), the view owns no threads, and destroying it is immediate. An answer that
+// arrives after something newer was asked (another search, another album) is dropped; one that never arrives costs nothing.
 class LibraryView : public QWidget {
   Q_OBJECT
 
@@ -83,7 +83,7 @@ class LibraryView : public QWidget {
   explicit LibraryView(QWidget *parent = nullptr);
   ~LibraryView() override;
 
-  // The source is not owned and must outlive the view's use of it (the view waits for its own worker tasks in the destructor).
+  // The source is not owned. It may be destroyed at any time: the view then stops waiting for its answers.
   void SetSource(LibrarySource *source);
   LibrarySource *source() const { return source_; }
 
@@ -160,6 +160,9 @@ class LibraryView : public QWidget {
   void StartLoad();
   void ApplySearch();
   void OnCoverLoaded(const quint64 id, const QImage &image);
+  void OnAlbumsLoaded(const quint64 id, const LibraryAlbumList &albums, const bool ok);
+  void OnTracksLoaded(const quint64 id, const SongList &songs, const bool ok);
+  void OnSourceDestroyed();
 
  private:
   void BuildUi();
@@ -167,22 +170,28 @@ class LibraryView : public QWidget {
   void UpdateSummary();
   void RefreshShown();
   void RebuildArtists();
-  void RunInPool(std::function<void()> work);
   void LoadTracksThen(const LibraryAlbum &album, std::function<void(const SongList&)> then);
   void ShowTracks(const SongList &songs);
   void LayoutAlbumPage();
 
   QPointer<LibrarySource> source_;
-  QThreadPool pool_;
-  quint64 load_generation_ = 0;
-  quint64 search_generation_ = 0;
+  quint64 next_request_ = 0;
+  // Requests under way. At most one full load and one search are current (an older answer is dropped); a tracks request carries what to do with the answer.
+  quint64 load_request_ = 0;
+  quint64 search_request_ = 0;
+  QString search_request_text_;
+  struct TracksRequest {
+    bool page = false;
+    quint64 generation = 0;
+    std::function<void(const SongList&)> then;
+  };
+  std::map<quint64, TracksRequest> tracks_requests_;
   quint64 tracks_generation_ = 0;
   bool loaded_ = false;
   bool load_pending_ = false;
   bool reload_when_idle_ = false;
   bool loading_ = false;
   bool first_load_started_ = false;
-  bool destroying_ = false;
   QString adding_folder_;
   QString already_added_folder_;
   QTimer *adding_timer_ = nullptr;

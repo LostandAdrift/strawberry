@@ -29,6 +29,7 @@
 #include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QThreadPool>
 #include <QSemaphore>
 #include <QStringList>
 #include <QUrl>
@@ -40,7 +41,14 @@
 class FakeLibrarySource : public LibrarySource {
  public:
   explicit FakeLibrarySource(const int album_count = 30, QObject *parent = nullptr) : LibrarySource(parent) {
+    pool_.setMaxThreadCount(2);
     Generate(album_count);
+  }
+  ~FakeLibrarySource() override {
+    // Workers waiting on a gate are let go; then the pool (declared last, so destroyed first) is waited for before this object goes.
+    ReleaseAlbums();
+    ReleaseTracks();
+    pool_.waitForDone();
   }
 
   static QStringList Artists() {
@@ -94,7 +102,8 @@ class FakeLibrarySource : public LibrarySource {
     tracks_.clear();
   }
 
-  LibraryAlbumList LoadAlbums(const QString &filter_text) override {
+  // The synchronous reads (they wait on the gates, so they run on a worker thread of the fake, never on the caller's).
+  LibraryAlbumList LoadAlbums(const QString &filter_text) {
     ++load_calls;
     if (gated_) gate.tryAcquire(1, 5000);
     QMutexLocker lock(&mutex_);
@@ -114,11 +123,25 @@ class FakeLibrarySource : public LibrarySource {
     return matching;
   }
 
-  SongList LoadTracks(const LibraryAlbum &album) override {
+  SongList LoadTracks(const LibraryAlbum &album) {
     ++track_calls;
     if (gated_tracks_) track_gate.tryAcquire(1, 5000);
     QMutexLocker lock(&mutex_);
     return tracks_.value(album.Key());
+  }
+
+  // The asynchronous interface: the read happens on a thread of the fake and the answer is queued to the source's own thread.
+  void RequestAlbums(const quint64 id, const QString &filter_text) override {
+    pool_.start([this, id, filter_text]() {
+      const LibraryAlbumList list = LoadAlbums(filter_text);
+      QMetaObject::invokeMethod(this, [this, id, list]() { Q_EMIT AlbumsLoaded(id, list, true); }, Qt::QueuedConnection);
+    });
+  }
+  void RequestTracks(const quint64 id, const LibraryAlbum &album) override {
+    pool_.start([this, id, album]() {
+      const SongList songs = LoadTracks(album);
+      QMetaObject::invokeMethod(this, [this, id, songs]() { Q_EMIT TracksLoaded(id, songs, true); }, Qt::QueuedConnection);
+    });
   }
 
   void RequestCover(const quint64 id, const LibraryAlbum &album, const int pixel_size) override {
@@ -162,6 +185,7 @@ class FakeLibrarySource : public LibrarySource {
   QHash<QString, SongList> tracks_;
   std::atomic<bool> gated_{false};
   std::atomic<bool> gated_tracks_{false};
+  QThreadPool pool_;
 };
 
 #endif  // LIBRARY_FIXTURE_H

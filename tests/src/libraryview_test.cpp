@@ -27,6 +27,9 @@
 #include <thread>
 
 #include <QApplication>
+#include <QElapsedTimer>
+#include <QSemaphore>
+#include <QThread>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPointer>
@@ -65,6 +68,38 @@ bool WaitSettled(LibraryView &view, const int timeout = 5000) {
 
 void WaitFor(const std::function<bool()> &condition, const int timeout = 5000) {
   QTRY_VERIFY_WITH_TIMEOUT(condition(), timeout);
+}
+
+// Asks a source for albums or tracks and waits for the answer on this thread's event loop.
+struct Answer {
+  bool arrived = false;
+  bool ok = false;
+};
+LibraryAlbumList AskAlbums(LibrarySource &source, Answer *answer = nullptr, const QString &filter = QString(), const int timeout = 5000) {
+  LibraryAlbumList result;
+  Answer local;
+  Answer &out = answer ? *answer : local;
+  QObject::connect(&source, &LibrarySource::AlbumsLoaded, &source, [&](const quint64 id, const LibraryAlbumList &list, const bool ok) {
+    if (id != 77) return;
+    result = list;
+    out.arrived = true;
+    out.ok = ok;
+  });
+  source.RequestAlbums(77, filter);
+  QTest::qWaitFor([&]() { return out.arrived; }, timeout);
+  return result;
+}
+SongList AskTracks(LibrarySource &source, const LibraryAlbum &album, const int timeout = 5000) {
+  SongList result;
+  bool arrived = false;
+  QObject::connect(&source, &LibrarySource::TracksLoaded, &source, [&](const quint64 id, const SongList &songs, const bool) {
+    if (id != 78) return;
+    result = songs;
+    arrived = true;
+  });
+  source.RequestTracks(78, album);
+  QTest::qWaitFor([&]() { return arrived; }, timeout);
+  return result;
 }
 
 QPoint CenterOfRow(QAbstractItemView *view, const int row) {
@@ -441,28 +476,68 @@ TEST(LibraryViewTest, ArtistsModeListsArtistsAndChoosingOneShowsTheirAlbums) {
 
 // --------------------------------------------------------------------------------------------------------------- lifecycle and cancellation
 
-TEST(LibraryViewTest, DestroyingTheViewWhileAReadIsPendingIsSafe) {
+TEST(LibraryViewTest, DestroyingTheViewWhileAReadIsPendingIsImmediateAndSafe) {
 
   FakeLibrarySource source(20);
   source.GateAlbums();
   auto view = std::make_unique<LibraryView>();
   view->SetSource(&source);
-  // The release comes from another thread: destroying the view blocks this one until the worker is done.
-  std::thread releaser([&source]() {
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    source.ReleaseAlbums();
-  });
   view->resize(900, 600);
   view->show();
   WaitFor([&]() { return source.load_calls.load() == 1; });
 
-  // The worker is inside the (blocked) read. Destroying the view waits for it and drops the answer: no crash, no signal into a dead widget.
+  // The read is still blocked in the source. The view owns no thread and waits for nothing, so it goes at once; the late answer reaches nobody.
   QPointer<LibraryView> guard(view.get());
+  QElapsedTimer timer;
+  timer.start();
   view.reset();
-  releaser.join();
+  EXPECT_LT(timer.elapsed(), 1000);
   EXPECT_TRUE(guard.isNull());
+  source.ReleaseAlbums();
   QCoreApplication::processEvents();
-  QTest::qWait(50);
+  QTest::qWait(100);
+
+}
+
+TEST(LibraryViewTest, DestroyingTheSourceWhileAReadIsPendingLeavesAUsableView) {
+
+  auto source = std::make_unique<FakeLibrarySource>(20);
+  source->GateAlbums();
+  LibraryView view;
+  view.SetSource(source.get());
+  view.resize(900, 600);
+  view.show();
+  WaitFor([&]() { return source->load_calls.load() == 1; });
+
+  source.reset();  // the answer never comes
+  EXPECT_EQ(nullptr, view.source());
+  QCoreApplication::processEvents();
+  // The view does not wait for it: it takes a new source and reads from that.
+  FakeLibrarySource other(7);
+  view.SetSource(&other);
+  ASSERT_TRUE(WaitSettled(view) || view.loaded());
+  EXPECT_EQ(7, view.album_count());
+
+}
+
+TEST(LibraryViewTest, AnswersOfAReplacedSourceAreDropped) {
+
+  FakeLibrarySource old_source(20);
+  old_source.GateAlbums();
+  LibraryView view;
+  view.SetSource(&old_source);
+  view.resize(900, 600);
+  view.show();
+  WaitFor([&]() { return old_source.load_calls.load() == 1; });
+
+  FakeLibrarySource fresh(5);
+  view.SetSource(&fresh);
+  ASSERT_TRUE(WaitSettled(view) || view.loaded());
+  EXPECT_EQ(5, view.album_count());
+
+  old_source.ReleaseAlbums();
+  QTest::qWait(150);
+  EXPECT_EQ(5, view.album_count());
 
 }
 
@@ -633,14 +708,14 @@ TEST(CollectionLibrarySourceTest, ReadsAlbumsAndTracksFromTheCollectionBackend) 
   backend.AddOrUpdateSongs(songs);
 
   CollectionLibrarySource source(&backend, nullptr);
-  const LibraryAlbumList albums = source.LoadAlbums(QString());
+  const LibraryAlbumList albums = AskAlbums(source);
   ASSERT_EQ(2, albums.count());
   EXPECT_EQ(QStringLiteral("Ines Varga"), albums.at(0).artist);
   EXPECT_EQ(QStringLiteral("Marin Holt"), albums.at(1).artist);
   EXPECT_EQ(QStringLiteral("Slow Tide"), albums.at(1).album);
   EXPECT_FALSE(albums.at(1).first_url.isEmpty());
 
-  const SongList tracks = source.LoadTracks(albums.at(1));
+  const SongList tracks = AskTracks(source, albums.at(1));
   ASSERT_EQ(3, tracks.count());
   EXPECT_EQ(1, tracks.at(0).track());
   EXPECT_EQ(QStringLiteral("Low Water"), tracks.at(0).title());
@@ -652,13 +727,180 @@ TEST(CollectionLibrarySourceTest, ReadsAlbumsAndTracksFromTheCollectionBackend) 
   QSignalSpy settled(&view, &LibraryView::AlbumsSettled);
   view.resize(900, 600);
   view.show();
-  // The worker hands the read to the backend's own thread (here: this one, which is processing events while it waits), so the in-memory
-  // database is read through the connection it belongs to, and the production view shows exactly what the backend holds.
+  // The read is queued to the backend's own thread (here: this one), so the in-memory database is read through the connection it belongs to.
   ASSERT_TRUE(settled.wait(5000) || view.loaded());
   EXPECT_EQ(2, view.album_count());
   EXPECT_EQ(2, view.artist_count());
   view.OpenAlbum(view.album_model()->album(1));
   QTRY_VERIFY_WITH_TIMEOUT(view.track_model()->rowCount() == 3, 5000);
   EXPECT_EQ(QStringLiteral("Low Water"), view.track_model()->index(0).data(LibraryTrackModel::TitleRole).toString());
+
+}
+
+// --------------------------------------------------------------------------------------------------------------- the real backend, on its own thread
+
+namespace {
+
+void FillBackend(CollectionBackend &backend) {
+
+  backend.AddDirectory(QStringLiteral("/music"));
+  SongList songs;
+  for (int i = 0; i < 3; ++i) {
+    Song song;
+    song.set_directory_id(1);
+    song.set_url(QUrl::fromLocalFile(QStringLiteral("/music/marin/slow-tide/%1.flac").arg(i + 1)));
+    song.set_mtime(1);
+    song.set_ctime(1);
+    song.set_filesize(1);
+    song.set_title(QStringLiteral("Track %1").arg(i + 1));
+    song.set_artist(QStringLiteral("Marin Holt"));
+    song.set_albumartist(QStringLiteral("Marin Holt"));
+    song.set_album(QStringLiteral("Slow Tide"));
+    song.set_track(3 - i);
+    song.set_disc(1);
+    song.set_length_nanosec(200000000000LL);
+    songs << song;
+  }
+  backend.AddOrUpdateSongs(songs);
+
+}
+
+}  // namespace
+
+TEST(CollectionLibrarySourceTest, ReadsOnTheBackendsOwnRunningThreadWithoutBlockingTheCaller) {
+
+  auto database = std::make_shared<MemoryDatabase>(nullptr);
+  CollectionBackend backend;
+  backend.Init(database, nullptr, Song::Source::Collection, QLatin1String(CollectionManager::kSongsTable), QLatin1String(CollectionManager::kDirsTable), QLatin1String(CollectionManager::kSubdirsTable));
+  QThread thread;
+  // Stops the thread on every path out of the test, including a failed assertion.
+  struct Stop {
+    QThread &thread;
+    CollectionBackend &backend;
+    ~Stop() {
+      thread.quit();
+      thread.wait(5000);
+      backend.moveToThread(QThread::currentThread());
+    }
+  } stop{thread, backend};
+  backend.moveToThread(&thread);
+  thread.start();
+  // The in-memory database belongs to the connection of the thread that uses it, so the test fills it from the backend's thread too.
+  QMetaObject::invokeMethod(&backend, [&backend]() { FillBackend(backend); }, Qt::BlockingQueuedConnection);
+
+  {
+    CollectionLibrarySource source(&backend, nullptr);
+    Answer answer;
+    const LibraryAlbumList albums = AskAlbums(source, &answer);
+    EXPECT_TRUE(answer.ok);
+    ASSERT_EQ(1, albums.count());
+    EXPECT_EQ(QStringLiteral("Slow Tide"), albums.first().album);
+    const SongList tracks = AskTracks(source, albums.first());
+    ASSERT_EQ(3, tracks.count());
+    EXPECT_EQ(1, tracks.first().track());
+
+    // The view on top of it, then both go while the backend lives on.
+    LibraryView view;
+    view.SetSource(&source);
+    view.resize(900, 600);
+    view.show();
+    QTRY_VERIFY_WITH_TIMEOUT(view.loaded(), 5000);
+    EXPECT_EQ(1, view.album_count());
+  }
+
+}
+
+TEST(CollectionLibrarySourceTest, AStoppedBackendThreadAnswersWithAFailureAndTheViewNeverWaits) {
+
+  auto database = std::make_shared<MemoryDatabase>(nullptr);
+  CollectionBackend backend;
+  backend.Init(database, nullptr, Song::Source::Collection, QLatin1String(CollectionManager::kSongsTable), QLatin1String(CollectionManager::kDirsTable), QLatin1String(CollectionManager::kSubdirsTable));
+  QThread thread;
+  backend.moveToThread(&thread);
+  thread.start();
+  thread.quit();
+  ASSERT_TRUE(thread.wait(5000));  // the backend object still exists, but nothing will ever run its queued calls
+
+  CollectionLibrarySource source(&backend, nullptr);
+  Answer answer;
+  const LibraryAlbumList albums = AskAlbums(source, &answer, QString(), 2000);
+  EXPECT_TRUE(answer.arrived);
+  EXPECT_FALSE(answer.ok);
+  EXPECT_TRUE(albums.isEmpty());
+
+  // This used to hang forever: the read waited for the dead thread (blocking queued call) and the view's destructor then waited for that read.
+  auto view = std::make_unique<LibraryView>();
+  view->SetSource(&source);
+  view->resize(900, 600);
+  view->show();
+  QTRY_VERIFY_WITH_TIMEOUT(view->loaded(), 2000);
+  EXPECT_EQ(LibraryView::State::Empty, view->state());
+  QElapsedTimer timer;
+  timer.start();
+  view.reset();
+  EXPECT_LT(timer.elapsed(), 1000);
+
+  backend.moveToThread(QThread::currentThread());
+
+}
+
+TEST(CollectionLibrarySourceTest, ABackendDeletedWithARequestQueuedAnswersWithAFailure) {
+
+  auto database = std::make_shared<MemoryDatabase>(nullptr);
+  auto *backend = new CollectionBackend;
+  backend->Init(database, nullptr, Song::Source::Collection, QLatin1String(CollectionManager::kSongsTable), QLatin1String(CollectionManager::kDirsTable), QLatin1String(CollectionManager::kSubdirsTable));
+  QThread thread;
+  QObject busy;  // keeps the thread occupied, so the request stays queued behind it
+  busy.moveToThread(&thread);
+  backend->moveToThread(&thread);
+  thread.start();
+  QSemaphore entered, release;
+  QMetaObject::invokeMethod(&busy, [&]() { entered.release(); release.acquire(); }, Qt::QueuedConnection);
+  entered.acquire();
+
+  CollectionLibrarySource source(backend, nullptr);
+  Answer answer;
+  bool arrived = false;
+  QObject::connect(&source, &LibrarySource::AlbumsLoaded, &source, [&](const quint64, const LibraryAlbumList &, const bool ok) { arrived = true; answer.ok = ok; });
+  source.RequestAlbums(1, QString());
+  delete backend;  // the queued call is dropped with it; the job reports the failure
+  release.release();
+  QTest::qWaitFor([&]() { return arrived; }, 5000);
+  EXPECT_TRUE(arrived);
+  EXPECT_FALSE(answer.ok);
+
+  thread.quit();
+  ASSERT_TRUE(thread.wait(5000));
+
+}
+
+TEST(CollectionLibrarySourceTest, ASourceDestroyedWhileTheBackendIsReadingIsNotTouchedAfterwards) {
+
+  auto database = std::make_shared<MemoryDatabase>(nullptr);
+  CollectionBackend backend;
+  backend.Init(database, nullptr, Song::Source::Collection, QLatin1String(CollectionManager::kSongsTable), QLatin1String(CollectionManager::kDirsTable), QLatin1String(CollectionManager::kSubdirsTable));
+  FillBackend(backend);
+  QThread thread;
+  QObject busy;
+  busy.moveToThread(&thread);
+  backend.moveToThread(&thread);
+  thread.start();
+  QSemaphore entered, release;
+  QMetaObject::invokeMethod(&busy, [&]() { entered.release(); release.acquire(); }, Qt::QueuedConnection);
+  entered.acquire();
+
+  auto source = std::make_unique<CollectionLibrarySource>(&backend, nullptr);
+  int answers = 0;
+  QObject::connect(source.get(), &LibrarySource::AlbumsLoaded, source.get(), [&]() { ++answers; });
+  source->RequestAlbums(1, QString());
+  source.reset();  // the read is queued on the backend's thread and runs after this
+  release.release();
+  QThread::msleep(100);
+  QCoreApplication::processEvents();
+  EXPECT_EQ(0, answers);
+
+  thread.quit();
+  ASSERT_TRUE(thread.wait(5000));
+  backend.moveToThread(QThread::currentThread());
 
 }

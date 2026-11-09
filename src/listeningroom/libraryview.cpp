@@ -159,7 +159,6 @@ QStringList Tokens(const QString &text) {
 
 LibraryView::LibraryView(QWidget *parent) : QWidget(parent), search_timer_(new QTimer(this)), reload_timer_(new QTimer(this)) {
 
-  pool_.setMaxThreadCount(2);
   setAccessibleName(tr("Library"));
   search_timer_->setSingleShot(true);
   search_timer_->setInterval(140);
@@ -181,15 +180,7 @@ LibraryView::LibraryView(QWidget *parent) : QWidget(parent), search_timer_(new Q
 
 }
 
-LibraryView::~LibraryView() {
-
-  // Results that are still on their way must not reach a half-destroyed widget, and the workers must not outlive the source they read.
-  // (A read can be waiting for the backend's thread; at shutdown that thread may be gone, so the wait is bounded.)
-  destroying_ = true;
-  pool_.clear();
-  pool_.waitForDone(3000);
-
-}
+LibraryView::~LibraryView() = default;
 
 void LibraryView::BuildUi() {
 
@@ -358,7 +349,15 @@ void LibraryView::SetSource(LibrarySource *source) {
   if (source_) {
     QObject::connect(source_, &LibrarySource::Changed, this, [this]() { if (first_load_started_) reload_timer_->start(); });
     QObject::connect(source_, &LibrarySource::CoverLoaded, this, &LibraryView::OnCoverLoaded);
+    QObject::connect(source_, &LibrarySource::AlbumsLoaded, this, &LibraryView::OnAlbumsLoaded);
+    QObject::connect(source_, &LibrarySource::TracksLoaded, this, &LibraryView::OnTracksLoaded);
+    QObject::connect(source_, &QObject::destroyed, this, &LibraryView::OnSourceDestroyed);
   }
+  // Answers to the old source's requests are not wanted.
+  load_request_ = 0;
+  search_request_ = 0;
+  tracks_requests_.clear();
+  loading_ = false;
   loaded_ = false;
   first_load_started_ = false;
   all_.clear();
@@ -486,15 +485,11 @@ const SongList &LibraryView::current_tracks() const {
   return track_model_->songs();
 }
 
-void LibraryView::RunInPool(std::function<void()> work) {
-  pool_.start(std::move(work));
-}
-
 // ------------------------------------------------------------------------------------------------------------ loading
 
 void LibraryView::Reload() {
 
-  if (!source_ || destroying_) return;
+  if (!source_) return;
   if (loading_) {
     reload_when_idle_ = true;
     return;
@@ -508,29 +503,63 @@ void LibraryView::StartLoad() {
   first_load_started_ = true;
   loading_ = true;
   reload_when_idle_ = false;
-  const quint64 generation = ++load_generation_;
   if (!loaded_) SetState(State::Loading);
 
-  QPointer<LibraryView> self(this);
-  QPointer<LibrarySource> source = source_;
-  RunInPool([self, source, generation]() {
-    const LibraryAlbumList list = source ? source->LoadAlbums(QString()) : LibraryAlbumList();
-    if (!self) return;
-    QMetaObject::invokeMethod(self.data(), [self, generation, list]() {
-      if (!self || self->destroying_ || generation != self->load_generation_) return;
-      self->loading_ = false;
-      self->loaded_ = true;
+  load_request_ = ++next_request_;
+  source_->RequestAlbums(load_request_, QString());
+
+}
+
+void LibraryView::OnAlbumsLoaded(const quint64 id, const LibraryAlbumList &list, const bool ok) {
+
+  if (id == load_request_ && id != 0) {
+    load_request_ = 0;
+    loading_ = false;
+    loaded_ = true;
+    // A failed read keeps what is shown; the next change of the collection reads again.
+    if (ok) {
       // Music arrived: the "reading this folder" note has done its job once the library has more than it had.
-      if (!self->adding_folder_.isEmpty() && list.count() > self->all_.count()) self->adding_folder_.clear();
-      self->all_ = list;
-      self->remote_matches_.clear();
-      self->remote_text_.clear();
-      self->RefreshShown();
-      if (!self->search_->text().trimmed().isEmpty()) self->ApplySearch();
-      if (self->reload_when_idle_) self->Reload();
-      Q_EMIT self->AlbumsSettled();
-    }, Qt::QueuedConnection);
-  });
+      if (!adding_folder_.isEmpty() && list.count() > all_.count()) adding_folder_.clear();
+      all_ = list;
+      remote_matches_.clear();
+      remote_text_.clear();
+    }
+    RefreshShown();
+    if (!search_->text().trimmed().isEmpty()) ApplySearch();
+    if (reload_when_idle_) Reload();
+    Q_EMIT AlbumsSettled();
+  } else if (id == search_request_ && id != 0) {
+    search_request_ = 0;
+    if (!ok || search_->text().trimmed() != search_request_text_) return;
+    remote_matches_ = list;
+    remote_text_ = search_request_text_;
+    RefreshShown();
+    Q_EMIT AlbumsSettled();
+  }
+
+}
+
+void LibraryView::OnTracksLoaded(const quint64 id, const SongList &songs, const bool ok) {
+
+  const auto it = tracks_requests_.find(id);
+  if (it == tracks_requests_.end()) return;
+  const TracksRequest request = it->second;
+  tracks_requests_.erase(it);
+  if (!ok) return;
+  // The album page shows only the album that was asked for last; actions on a tile do not depend on it.
+  if (request.page && request.generation != tracks_generation_) return;
+  request.then(songs);
+
+}
+
+void LibraryView::OnSourceDestroyed() {
+
+  // Nothing will answer any more: do not wait for it.
+  source_.clear();
+  load_request_ = 0;
+  search_request_ = 0;
+  tracks_requests_.clear();
+  loading_ = false;
 
 }
 
@@ -565,21 +594,9 @@ void LibraryView::ApplySearch() {
     return;
   }
 
-  const quint64 generation = ++search_generation_;
-  QPointer<LibraryView> self(this);
-  QPointer<LibrarySource> source = source_;
-  RunInPool([self, source, generation, text]() {
-    const LibraryAlbumList list = source ? source->LoadAlbums(text) : LibraryAlbumList();
-    if (!self) return;
-    QMetaObject::invokeMethod(self.data(), [self, generation, text, list]() {
-      if (!self || self->destroying_ || generation != self->search_generation_) return;
-      if (self->search_->text().trimmed() != text) return;
-      self->remote_matches_ = list;
-      self->remote_text_ = text;
-      self->RefreshShown();
-      Q_EMIT self->AlbumsSettled();
-    }, Qt::QueuedConnection);
-  });
+  search_request_ = ++next_request_;
+  search_request_text_ = text;
+  source_->RequestAlbums(search_request_, text);
 
 }
 
@@ -772,18 +789,9 @@ void LibraryView::LoadTracksThen(const LibraryAlbum &album, std::function<void(c
   if (!source_) return;
   const bool page = state_ == State::Album && album.Key() == current_album_.Key();
   const quint64 generation = page ? ++tracks_generation_ : 0;
-  QPointer<LibraryView> self(this);
-  QPointer<LibrarySource> source = source_;
-  RunInPool([self, source, album, generation, page, then]() {
-    const SongList songs = source ? source->LoadTracks(album) : SongList();
-    if (!self) return;
-    QMetaObject::invokeMethod(self.data(), [self, generation, page, songs, then]() {
-      if (!self || self->destroying_) return;
-      // The album page shows only the album that was asked for last; actions on a tile do not depend on it.
-      if (page && generation != self->tracks_generation_) return;
-      then(songs);
-    }, Qt::QueuedConnection);
-  });
+  const quint64 id = ++next_request_;
+  tracks_requests_[id] = TracksRequest{page, generation, std::move(then)};
+  source_->RequestTracks(id, album);
 
 }
 
