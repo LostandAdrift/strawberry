@@ -1827,6 +1827,11 @@ void MainWindow::BuildStreamingView() {
     const EngineBase::State state = app_->player()->GetState();
     return state == EngineBase::State::Playing || state == EngineBase::State::Paused;
   });
+  // A closed snapshot is not refreshed automatically: replacing it re-opens a tab.
+  streaming_view_->SetSnapshotOpenFunction([this](const QString &identity) {
+    const int id = app_->playlist_manager()->FindSnapshotId(identity);
+    return id >= 0 && app_->playlist_manager()->IsPlaylistOpen(id);
+  });
   {
     Settings s;
     s.beginGroup(u"StreamingImport"_s);

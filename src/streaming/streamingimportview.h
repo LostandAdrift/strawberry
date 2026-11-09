@@ -95,6 +95,9 @@ class StreamingImportView : public QWidget {
   // Whether the snapshot is the playlist that is playing right now (or paused in the player). Asked before reading and again right before a snapshot is replaced.
   void SetSnapshotPlayingFunction(std::function<bool(const QString &identity)> function) { snapshot_playing_ = function; }
 
+  // Whether the local snapshot is open as a playlist tab. Automatic refresh never replaces a closed snapshot, because that re-opens a tab. Not set means open.
+  void SetSnapshotOpenFunction(std::function<bool(const QString &identity)> function) { snapshot_open_ = function; }
+
   // Automatic refresh of existing snapshots. The opt-in is stored by the host (see AutoRefreshChanged) together with the account it was given for.
   static constexpr int kDefaultAutoRefreshMs = 15 * 60 * 1000;
   void SetAutoRefreshInterval(const int msecs);
@@ -105,6 +108,8 @@ class StreamingImportView : public QWidget {
   bool auto_refresh_enabled(const QString &service_key) const;
   bool auto_refresh_running() const;
   bool auto_refresh_paused(const QString &service_key) const;
+  // The earliest time automatic reads may happen again after a provider wait (Retry-After). Invalid when there is none.
+  QDateTime auto_refresh_cooldown_until(const QString &service_key) const;
 
   static QString Identity(const QString &url_scheme, const QString &playlist_id);
 
@@ -205,9 +210,10 @@ class StreamingImportView : public QWidget {
     bool auto_paused = false;
     QDateTime auto_due;  // invalid: due now
     QDateTime auto_last_ok;
-    bool auto_waiting_rate_limit = false;
-    QStringList auto_deferred;  // names of playing snapshots that were left alone, until a run refreshes them
-    QSet<QString> auto_deferred_ids;
+    QDateTime auto_cooldown_until;  // a provider wait (Retry-After) for automatic reads. Not reset by turning the feature off and on.
+    QMap<QString, QString> auto_deferred;  // identity -> name of the playing snapshots that were left alone, until a run refreshes them
+    QMap<QString, QString> auto_closed;  // identity -> name of closed snapshots that automatic refresh left alone
+    QString read_account;  // the account that was signed in when the running read started
     QString auto_result;
     bool auto_committing = false;
     bool auto_replied = false;
@@ -254,6 +260,9 @@ class StreamingImportView : public QWidget {
   void SetAutoEnabled(Svc *svc, const bool enabled);
   void DropAutoOptIn(Svc *svc, const QString &reason);
   void UpdateAutoRow(const Svc *svc);
+  bool StaleRead(const Svc *svc) const;
+  void HandleStaleRead(Svc *svc);
+  void NoteProviderWait(Svc *svc, const int retry_after_sec);
   bool SnapshotExistsNow(const Svc *svc, const QString &identity) const;
   bool SnapshotPlaying(const Svc *svc, const QString &playlist_id) const;
   QString AutoStatusText(const Svc *svc) const;
@@ -267,6 +276,7 @@ class StreamingImportView : public QWidget {
   int current_ = -1;
   std::function<bool(const QString &)> snapshot_exists_;
   std::function<bool(const QString &)> snapshot_playing_;
+  std::function<bool(const QString &)> snapshot_open_;
   QTimer auto_timer_;
   int auto_interval_ms_ = kDefaultAutoRefreshMs;
   bool compact_ = false;

@@ -68,7 +68,6 @@ constexpr int kPlaylistRole = Qt::UserRole + 1;
 constexpr int kImportedRole = Qt::UserRole + 2;
 constexpr int kCompactWidth = 640;
 constexpr int kMaxRetryBlockSecs = 120;
-constexpr int kMaxAutoRateLimitSecs = 3600;
 
 QString Tracks(const int n) {
   return n == 1 ? QObject::tr("1 track") : QObject::tr("%1 tracks").arg(n);
@@ -741,6 +740,12 @@ void StreamingImportView::ConnectService(Svc *svc) {
   QObject::connect(importer, &PlaylistImport::Importer::StateChanged, this, [this]() { UpdateAll(); });
   QObject::connect(importer, &PlaylistImport::Importer::Progress, this, [this, svc](const int loaded, const int total) {
     if (svc != current()) return;
+    if (svc->run.active) {
+      // The automatic run reports in its own status line and must not leave "Reading…" behind as the page's status.
+      progress_->setRange(0, total > 0 ? total : 0);
+      progress_->setValue(total > 0 ? std::min(loaded, total) : 0);
+      return;
+    }
     if (total > 0) {
       progress_->setRange(0, total);
       progress_->setValue(std::min(loaded, total));
@@ -755,6 +760,11 @@ void StreamingImportView::ConnectService(Svc *svc) {
   });
 
   QObject::connect(importer, &PlaylistImport::Importer::PlaylistsLoaded, this, [this, svc](const QList<PlaylistImport::PlaylistInfo> &playlists) {
+    // The answer belongs to the account that was signed in when the read started. If another one is signed in now, it is not cached as that account's list.
+    if (StaleRead(svc)) {
+      HandleStaleRead(svc);
+      return;
+    }
     svc->playlists = playlists;
     svc->loaded = true;
     svc->loaded_at = QDateTime::currentDateTime();
@@ -780,6 +790,10 @@ void StreamingImportView::ConnectService(Svc *svc) {
   });
 
   QObject::connect(importer, &PlaylistImport::Importer::PlaylistImported, this, [this, svc](const PlaylistImport::PlaylistInfo &playlist, const QList<PlaylistImport::Track> &tracks, const int skipped) {
+    if (StaleRead(svc)) {
+      HandleStaleRead(svc);
+      return;
+    }
     if (svc->run.active) {
       if (!svc->run.reading_list && playlist.id == svc->run.current.id) {
         AutoCommit(svc, playlist, tracks, skipped);
@@ -807,10 +821,9 @@ void StreamingImportView::ConnectService(Svc *svc) {
       if (failure.kind != PlaylistImport::FailureKind::RateLimited) shown.message += u' ' + tr("Automatic refresh is paused. Your local playlists keep their last snapshot.");
       SetFailure(svc, shown);
       if (failure.kind == PlaylistImport::FailureKind::RateLimited) {
-        const int wait = std::clamp(failure.retry_after_sec > 0 ? failure.retry_after_sec : 30, 1, kMaxAutoRateLimitSecs);
-        svc->auto_waiting_rate_limit = true;
+        NoteProviderWait(svc, failure.retry_after_sec);
         // Retry-After is a floor: never earlier than the wait, and never sooner than the normal interval.
-        svc->auto_due = QDateTime::currentDateTime().addSecs(std::max<qint64>(wait, auto_interval_ms_ / 1000));
+        svc->auto_due = std::max(QDateTime::currentDateTime().addMSecs(auto_interval_ms_), svc->auto_cooldown_until);
         svc->auto_paused = false;
       }
       else {
@@ -991,6 +1004,7 @@ void StreamingImportView::StartList(Svc *svc) {
     return;
   }
   svc->last_op = Op{Op::Kind::List, PlaylistImport::PlaylistInfo()};
+  svc->read_account = svc->entry.account->account_key();
   svc->status.clear();
   svc->notice.clear();
   svc->importer->LoadPlaylists();
@@ -1002,6 +1016,7 @@ void StreamingImportView::StartImport(Svc *svc, const PlaylistImport::PlaylistIn
   if (!svc || svc->importer->busy() || AnyRun() || playlist.id.isEmpty()) return;
   if (svc->session->state() != AccountSession::State::SignedIn) return;
   svc->last_op = Op{Op::Kind::Import, playlist};
+  svc->read_account = svc->entry.account->account_key();
   svc->status.clear();
   svc->notice.clear();
   svc->importer->ImportPlaylist(playlist);
@@ -1112,6 +1127,7 @@ void StreamingImportView::SetFailure(Svc *svc, const PlaylistImport::Failure &fa
   if (failure.kind == PlaylistImport::FailureKind::RateLimited) {
     const int wait = std::clamp(failure.retry_after_sec > 0 ? failure.retry_after_sec : 30, 1, kMaxRetryBlockSecs);
     svc->retry_blocked_until = QDateTime::currentDateTime().addSecs(wait);
+    NoteProviderWait(svc, failure.retry_after_sec);  // the longer, unclamped wait applies to automatic reads
     // Re-enable the Retry button when the wait is over.
     QTimer::singleShot(wait * 1000 + 50, this, [this]() { if (current()) UpdateBanner(current()); });
   }
@@ -1157,8 +1173,7 @@ void StreamingImportView::ShowImported(const QString &playlist_name, const bool 
     // The answer to an automatic refresh: no navigation, no "Open" button, no replacement of the user's own status line.
     committing->auto_replied = true;
     ++committing->run.refreshed;
-    committing->auto_deferred_ids.remove(Identity(committing->entry.url_scheme, committing->run.current.id));
-    committing->auto_deferred.removeAll(committing->run.current.name);
+    committing->auto_deferred.remove(Identity(committing->entry.url_scheme, committing->run.current.id));
     Q_UNUSED(playlist_name)
     Q_UNUSED(replaced)
     Q_UNUSED(track_count)
@@ -1596,7 +1611,7 @@ void StreamingImportView::SetAutoRefreshInterval(const int msecs) {
   // A shorter interval also shortens a wait that is already scheduled, except a wait the service asked for.
   const QDateTime soonest = QDateTime::currentDateTime().addMSecs(auto_interval_ms_);
   for (Svc *svc : std::as_const(services_)) {
-    if (svc->auto_due.isValid() && !svc->auto_waiting_rate_limit && svc->auto_due > soonest) svc->auto_due = soonest;
+    if (svc->auto_due.isValid() && svc->auto_due > soonest) svc->auto_due = soonest;
   }
 
 }
@@ -1626,6 +1641,11 @@ bool StreamingImportView::auto_refresh_running() const {
 bool StreamingImportView::auto_refresh_paused(const QString &service_key) const {
   const Svc *svc = find(service_key);
   return svc && svc->auto_enabled && svc->auto_paused;
+}
+
+QDateTime StreamingImportView::auto_refresh_cooldown_until(const QString &service_key) const {
+  const Svc *svc = find(service_key);
+  return svc ? svc->auto_cooldown_until : QDateTime();
 }
 
 void StreamingImportView::RestoreAutoRefresh(const QString &service_key, const QString &account_key) {
@@ -1667,10 +1687,9 @@ void StreamingImportView::DropAutoOptIn(Svc *svc, const QString &reason) {
   svc->auto_enabled = false;
   svc->auto_account.clear();
   svc->auto_paused = false;
-  svc->auto_waiting_rate_limit = false;
-  svc->auto_due = QDateTime();
+  svc->auto_due = QDateTime();  // the provider cooldown is deliberately kept
   svc->auto_deferred.clear();
-  svc->auto_deferred_ids.clear();
+  svc->auto_closed.clear();
   svc->auto_result = reason;  // shown by the automatic refresh row, which a later read of the list does not clear
   if (!reason.isEmpty()) svc->notice = reason;
   Q_EMIT AutoRefreshChanged(svc->entry.account->key(), false, QString());
@@ -1689,7 +1708,6 @@ void StreamingImportView::SetAutoEnabled(Svc *svc, const bool enabled) {
     svc->auto_enabled = true;
     svc->auto_account = account;
     svc->auto_paused = false;
-    svc->auto_waiting_rate_limit = false;
     svc->auto_due = QDateTime();  // due at the next eligible activation or timer tick, not in the middle of the click
     svc->auto_result.clear();
     Q_EMIT AutoRefreshChanged(svc->entry.account->key(), true, account);
@@ -1709,6 +1727,7 @@ bool StreamingImportView::AutoDue(Svc *svc) {
   const QDateTime now = QDateTime::currentDateTime();
   if (svc->auto_due.isValid() && now < svc->auto_due) return false;
   if (now < svc->retry_blocked_until) return false;
+  if (svc->auto_cooldown_until.isValid() && now < svc->auto_cooldown_until) return false;
   return true;
 
 }
@@ -1733,7 +1752,7 @@ void StreamingImportView::StartAutoRun(Svc *svc) {
   svc->run = Svc::AutoRun();
   svc->run.active = true;
   svc->run.reading_list = true;
-  svc->auto_waiting_rate_limit = false;
+  svc->read_account = svc->entry.account->account_key();
   svc->auto_result.clear();
   svc->importer->LoadPlaylists();
   if (!svc->importer->busy()) {
@@ -1755,7 +1774,16 @@ void StreamingImportView::AutoNext(Svc *svc) {
 
   while (!svc->run.queue.isEmpty()) {
     const PlaylistImport::PlaylistInfo info = svc->run.queue.takeFirst();
-    if (!SnapshotExistsNow(svc, Identity(svc->entry.url_scheme, info.id))) continue;  // deleted meanwhile
+    if (!SnapshotExistsNow(svc, Identity(svc->entry.url_scheme, info.id))) {  // deleted meanwhile
+      svc->auto_deferred.remove(Identity(svc->entry.url_scheme, info.id));
+      svc->auto_closed.remove(Identity(svc->entry.url_scheme, info.id));
+      continue;
+    }
+    if (snapshot_open_ && !snapshot_open_(Identity(svc->entry.url_scheme, info.id))) {
+      svc->auto_closed.insert(Identity(svc->entry.url_scheme, info.id), info.name);  // not even read
+      continue;
+    }
+    svc->auto_closed.remove(Identity(svc->entry.url_scheme, info.id));
     if (SnapshotPlaying(svc, info.id)) {
       AutoDefer(svc, info);  // not even read: playback is never disturbed
       continue;
@@ -1773,22 +1801,29 @@ void StreamingImportView::AutoNext(Svc *svc) {
 void StreamingImportView::AutoDefer(Svc *svc, const PlaylistImport::PlaylistInfo &playlist) {
 
   const QString identity = Identity(svc->entry.url_scheme, playlist.id);
-  if (!svc->auto_deferred_ids.contains(identity)) {
-    svc->auto_deferred_ids.insert(identity);
-    svc->auto_deferred << playlist.name;
-  }
+  svc->auto_deferred.insert(identity, playlist.name);
 
 }
 
 void StreamingImportView::AutoCommit(Svc *svc, const PlaylistImport::PlaylistInfo &playlist, const QList<PlaylistImport::Track> &tracks, const int skipped) {
 
   const QString identity = Identity(svc->entry.url_scheme, playlist.id);
+  // Eligibility is checked at the moment of replacement too: the account can change while a read is in flight and stay signed in.
+  if (!svc->auto_enabled || svc->session->state() != AccountSession::State::SignedIn || !AutoAccountMatches(svc)) {
+    EndAutoRun(svc, AutoEnd::Ineligible);
+    return;
+  }
   // Checked again at the moment of replacement: it may have started playing while it was being read. Then the read is dropped.
   if (SnapshotPlaying(svc, playlist.id)) {
     AutoDefer(svc, playlist);
     return;
   }
   if (!SnapshotExistsNow(svc, identity)) return;
+  // A closed snapshot would be re-opened by the host, which can add a tab. Nothing is opened by an automatic run: it waits until the user has it open.
+  if (snapshot_open_ && !snapshot_open_(identity)) {
+    svc->auto_closed.insert(identity, playlist.name);
+    return;
+  }
 
   SongList songs;
   songs.reserve(tracks.count());
@@ -1799,6 +1834,17 @@ void StreamingImportView::AutoCommit(Svc *svc, const PlaylistImport::PlaylistInf
   svc->auto_replied = false;
   Q_EMIT SnapshotReady(svc->entry.name, identity, QStringLiteral("%1: %2").arg(svc->entry.name, playlist.name), songs, skipped);
   svc->auto_committing = false;
+  if (!svc->auto_replied && svc->run.active) {
+    // No acknowledgement: do not report success. The host must answer ShowImported()/ShowImportFailed() from the SnapshotReady slot.
+    PlaylistImport::Failure failure;
+    failure.kind = PlaylistImport::FailureKind::BadResponse;
+    failure.title = tr("The local playlist was not confirmed");
+    failure.message = tr("“%1” was read from %2 but Adrift did not get a confirmation that it was stored. Automatic refresh is paused.").arg(playlist.name, svc->entry.name);
+    EndAutoRun(svc, AutoEnd::Failed);
+    svc->auto_paused = true;
+    SetFailure(svc, failure);
+    UpdateAll();
+  }
 
 }
 
@@ -1859,8 +1905,8 @@ QString StreamingImportView::AutoStatusText(const Svc *svc) const {
   else if (svc->session->state() != AccountSession::State::SignedIn) {
     parts << tr("Waiting for you to sign in to %1.").arg(name);
   }
-  else if (svc->auto_waiting_rate_limit && svc->auto_due.isValid()) {
-    parts << tr("%1 asked Adrift to wait. Next automatic try at %2.").arg(name, QLocale().toString(svc->auto_due.time(), QLocale::ShortFormat));
+  else if (svc->auto_cooldown_until.isValid() && QDateTime::currentDateTime() < svc->auto_cooldown_until) {
+    parts << tr("%1 asked Adrift to wait. Next automatic try after %2.").arg(name, QLocale().toString(svc->auto_cooldown_until, QLocale::ShortFormat));
   }
   else if (svc->auto_due.isValid()) {
     parts << tr("On. Only playlists already imported are updated, read-only. Next about %1.").arg(QLocale().toString(svc->auto_due.time(), QLocale::ShortFormat));
@@ -1870,7 +1916,10 @@ QString StreamingImportView::AutoStatusText(const Svc *svc) const {
   }
   if (!svc->auto_result.isEmpty() && !svc->run.active) parts << svc->auto_result;
   if (!svc->auto_deferred.isEmpty()) {
-    parts << tr("Playing now, so not changed: %1. It is updated by a later run when it is not playing.").arg(svc->auto_deferred.join(u", "_s));
+    parts << tr("Playing now, so not changed: %1. It is updated by a later run when it is not playing.").arg(QStringList(svc->auto_deferred.values()).join(u", "_s));
+  }
+  if (!svc->auto_closed.isEmpty()) {
+    parts << tr("Not open as a playlist, so not changed: %1. Open it to let automatic refresh update it. Nothing is opened for you.").arg(QStringList(svc->auto_closed.values()).join(u", "_s));
   }
   return parts.join(u' ');
 
@@ -1885,18 +1934,41 @@ void StreamingImportView::UpdateAutoRow(const Svc *svc) {
     return;
   }
   const bool signed_in = svc->session->state() == AccountSession::State::SignedIn;
-  const int minutes = std::max(1, auto_interval_ms_ / 60000);
   auto_check_->show();
   auto_status_->show();
   {
     QSignalBlocker blocker(auto_check_);
     auto_check_->setChecked(svc->auto_enabled);
   }
-  auto_check_->setText(tr("Keep imported %1 playlists up to date (read-only, about every %2 minutes)").arg(svc->entry.name).arg(minutes));
+  auto_check_->setText(tr("Keep imported playlists up to date"));
   auto_check_->setEnabled(svc->auto_enabled || signed_in);
   auto_check_->setToolTip(svc->auto_enabled || signed_in ? QString() : tr("Sign in to turn this on."));
   auto_status_->setText(AutoStatusText(svc));
   auto_resume_->setVisible(svc->auto_enabled && svc->auto_paused && !svc->run.active);
   auto_resume_->setEnabled(!svc->importer->busy() && !AnyRun());
+
+}
+
+bool StreamingImportView::StaleRead(const Svc *svc) const {
+  return !svc->read_account.isEmpty() && svc->read_account != svc->entry.account->account_key();
+}
+
+void StreamingImportView::HandleStaleRead(Svc *svc) {
+
+  // Nothing of this read is kept or committed. The earlier list (if any) belongs to the earlier account.
+  svc->read_account.clear();
+  if (svc->run.active) EndAutoRun(svc, AutoEnd::Ineligible, QString());
+  svc->status = tr("The account changed while reading. Nothing was imported.");
+  DiscardIfAccountChanged(svc);
+  AutoAccountMatches(svc);  // drops the opt-in of the earlier account
+  UpdateAll();
+
+}
+
+void StreamingImportView::NoteProviderWait(Svc *svc, const int retry_after_sec) {
+
+  const int wait = retry_after_sec > 0 ? retry_after_sec : 30;
+  const QDateTime until = QDateTime::currentDateTime().addSecs(static_cast<qint64>(wait));
+  if (!svc->auto_cooldown_until.isValid() || until > svc->auto_cooldown_until) svc->auto_cooldown_until = until;
 
 }

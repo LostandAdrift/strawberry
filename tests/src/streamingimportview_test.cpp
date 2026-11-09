@@ -28,6 +28,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMetaObject>
@@ -1708,6 +1709,7 @@ class AutoRefreshTest : public StreamingImportViewTest {
     source->responder = [this](const bool tracks, const QString &playlist_id, const int) {
       if (!tracks) {
         ++list_reads;
+        if (on_list) on_list();
         return Ok(PlaylistsPage(3));
       }
       track_order << playlist_id;
@@ -1739,6 +1741,7 @@ class AutoRefreshTest : public StreamingImportViewTest {
   QSet<QString> playing;
   QStringList track_order;
   std::function<void(const QString &)> on_tracks;
+  std::function<void()> on_list;
   std::function<PageResult()> fail_tracks;
   int list_reads = 0;
   bool overlapping = false;
@@ -1769,7 +1772,8 @@ TEST_F(AutoRefreshTest, TurningItOnIsStoredWithTheAccountAndWaitsForTheNextActiv
   EXPECT_FALSE(view.auto_refresh_running());
   EXPECT_EQ(source->requests, 0);  // not in the middle of the click
   EXPECT_NE(view.auto_status_label()->text().indexOf(QStringLiteral("read-only")), -1);
-  EXPECT_NE(view.auto_check()->text().indexOf(QStringLiteral("read-only")), -1);
+  // Concise checkbox, the details wrap in the status line.
+  EXPECT_LT(view.auto_check()->text().size(), 45);
 }
 
 TEST_F(AutoRefreshTest, RefreshesOnlyExistingSnapshotsOneAfterTheOther) {
@@ -2100,4 +2104,192 @@ TEST_F(AutoRefreshTest, DestroyingTheViewDuringARunIsHarmless) {
   ASSERT_TRUE(view.auto_refresh_running());
   // The fixture destroys the view with the run active: the destructor cancels it without further requests.
   view.hide();
+}
+
+TEST_F(AutoRefreshTest, AnAccountChangeWhileATrackReadIsInFlightCommitsNothing) {
+  Enable();
+  on_tracks = [this](const QString &id) {
+    if (id == QStringLiteral("pl-1")) account->account = QStringLiteral("99");  // still signed in, but as somebody else
+  };
+  view.RunAutoRefreshIfDue();
+  ASSERT_TRUE(WaitRunDone());
+  Pump();
+  EXPECT_TRUE(snapshots.isEmpty());  // the old account's data is not committed
+  EXPECT_EQ(track_order, QStringList() << QStringLiteral("pl-1"));
+  EXPECT_FALSE(view.auto_refresh_enabled(QStringLiteral("tidal")));
+  EXPECT_FALSE(stored_enabled);
+  EXPECT_NE(view.auto_status_label()->text().indexOf(QStringLiteral("different account")), -1);
+}
+
+TEST_F(AutoRefreshTest, AnAccountChangeWhileTheListIsReadDoesNotCacheItForTheNewAccount) {
+  Enable();
+  on_list = [this]() { account->account = QStringLiteral("99"); };
+  view.RunAutoRefreshIfDue();
+  ASSERT_TRUE(WaitRunDone());
+  Pump();
+  on_list = nullptr;
+  EXPECT_EQ(source->track_requests, 0);
+  EXPECT_TRUE(snapshots.isEmpty());
+  EXPECT_EQ(view.playlist_list()->count(), 0);  // the earlier list was the other account's and the answer is not attributed to the new one
+  EXPECT_FALSE(view.auto_refresh_enabled(QStringLiteral("tidal")));
+}
+
+TEST_F(AutoRefreshTest, AManualImportThatCrossesAnAccountChangeIsNotCommitted) {
+  SignInAndLoad();
+  SelectFirst();
+  on_tracks = [this](const QString &) { account->account = QStringLiteral("99"); };
+  view.import_button()->click();
+  Pump();
+  WaitFor([this]() { return !view.importer(QStringLiteral("tidal"))->busy(); });
+  Pump();
+  EXPECT_TRUE(snapshots.isEmpty());
+}
+
+TEST_F(AutoRefreshTest, ProviderWaitsLongerThanAnHourAreHonoredAndSurviveToggling) {
+  view.SetAutoRefreshInterval(30);
+  Enable();
+  fail_tracks = []() {
+    PageResult result = Http(429);
+    result.retry_after_sec = 7200;
+    return result;
+  };
+  const QDateTime start = QDateTime::currentDateTime();
+  view.RunAutoRefreshIfDue();
+  ASSERT_TRUE(WaitRunDone());
+  Pump();
+  const QDateTime cooldown = view.auto_refresh_cooldown_until(QStringLiteral("tidal"));
+  ASSERT_TRUE(cooldown.isValid());
+  EXPECT_GE(start.secsTo(cooldown), 7190);  // not clamped to an hour
+  fail_tracks = nullptr;
+
+  // Turning it off and on again does not reset the provider's wait.
+  view.auto_check()->click();
+  view.auto_check()->click();
+  ASSERT_TRUE(view.auto_check()->isChecked());
+  EXPECT_EQ(view.auto_refresh_cooldown_until(QStringLiteral("tidal")), cooldown);
+  const int before = source->requests;
+  view.RunAutoRefreshIfDue();
+  view.Activate();
+  WaitFor([]() { return false; }, 150);
+  EXPECT_EQ(source->requests, before);
+  // Resume cannot bypass it either.
+  EXPECT_NE(view.auto_status_label()->text().indexOf(QStringLiteral("asked Adrift to wait")), -1);
+}
+
+TEST_F(AutoRefreshTest, AManualRateLimitAlsoStopsAutomaticReadsForTheFullWait) {
+  Enable();
+  source->responder = [this](const bool, const QString &, const int) {
+    PageResult result = Http(429);
+    result.retry_after_sec = 5000;
+    return result;
+  };
+  view.reload_button()->click();
+  ASSERT_TRUE(WaitFor([this]() { return view.banner()->isVisible(); }));
+  EXPECT_GE(QDateTime::currentDateTime().secsTo(view.auto_refresh_cooldown_until(QStringLiteral("tidal"))), 4990);
+  const int before = source->requests;
+  view.RunAutoRefreshIfDue();
+  Pump();
+  EXPECT_EQ(source->requests, before);
+}
+
+TEST_F(AutoRefreshTest, ADeferredSnapshotIsNoLongerReportedOnceItWasRefreshed) {
+  Enable();
+  playing << QStringLiteral("tidal:pl-1");
+  view.RunAutoRefreshIfDue();
+  ASSERT_TRUE(WaitRunDone());
+  ASSERT_NE(view.auto_status_label()->text().indexOf(QStringLiteral("Playing now, so not changed: Mix 1")), -1);
+  playing.clear();
+  view.SetAutoRefreshInterval(20);
+  ASSERT_TRUE(WaitFor([this]() { return snapshots.contains(QStringLiteral("tidal:pl-1")); }));
+  ASSERT_TRUE(WaitRunDone());
+  Pump();
+  EXPECT_EQ(view.auto_status_label()->text().indexOf(QStringLiteral("Playing now")), -1);
+  EXPECT_EQ(view.auto_status_label()->text().indexOf(QStringLiteral("Mix 1")), -1);
+}
+
+TEST_F(AutoRefreshTest, AHostThatNeverAnswersIsNotReportedAsSuccess) {
+  Enable();
+  QObject::disconnect(&view, &StreamingImportView::SnapshotReady, &view, nullptr);
+  int emitted = 0;
+  QObject::connect(&view, &StreamingImportView::SnapshotReady, &view, [&emitted](const QString &, const QString &, const QString &, const SongList &, const int) { ++emitted; });
+  view.RunAutoRefreshIfDue();
+  ASSERT_TRUE(WaitRunDone());
+  Pump();
+  EXPECT_EQ(emitted, 1);  // stopped at the first unconfirmed one
+  EXPECT_TRUE(view.auto_refresh_paused(QStringLiteral("tidal")));
+  EXPECT_TRUE(view.banner()->isVisible());
+  EXPECT_EQ(view.auto_status_label()->text().indexOf(QStringLiteral("Updated")), -1);
+  EXPECT_NE(view.banner_title()->text().indexOf(QStringLiteral("not confirmed")), -1);
+}
+
+TEST_F(AutoRefreshTest, AClosedSnapshotIsNeitherReadNorReplacedAndSaysWhy) {
+  QSet<QString> open;
+  open << QStringLiteral("tidal:pl-3");
+  view.SetSnapshotOpenFunction([&open](const QString &identity) { return open.contains(identity); });
+  Enable();
+  view.RunAutoRefreshIfDue();
+  ASSERT_TRUE(WaitRunDone());
+  Pump();
+  EXPECT_EQ(track_order, QStringList() << QStringLiteral("pl-3"));
+  EXPECT_EQ(snapshots, QStringList() << QStringLiteral("tidal:pl-3"));
+  EXPECT_NE(view.auto_status_label()->text().indexOf(QStringLiteral("Not open as a playlist, so not changed: Mix 1")), -1);
+  EXPECT_NE(view.auto_status_label()->text().indexOf(QStringLiteral("Nothing is opened for you")), -1);
+  view.SetSnapshotOpenFunction(nullptr);
+}
+
+TEST_F(AutoRefreshTest, ASnapshotClosedWhileItIsReadIsNotReplaced) {
+  QSet<QString> open;
+  open << QStringLiteral("tidal:pl-1") << QStringLiteral("tidal:pl-3");
+  view.SetSnapshotOpenFunction([&open](const QString &identity) { return open.contains(identity); });
+  Enable();
+  on_tracks = [&open](const QString &id) {
+    if (id == QStringLiteral("pl-1")) open.remove(QStringLiteral("tidal:pl-1"));
+  };
+  view.RunAutoRefreshIfDue();
+  ASSERT_TRUE(WaitRunDone());
+  Pump();
+  EXPECT_EQ(snapshots, QStringList() << QStringLiteral("tidal:pl-3"));
+  view.SetSnapshotOpenFunction(nullptr);
+}
+
+TEST_F(AutoRefreshTest, TheCheckboxStaysConciseAtCompactWidth) {
+  Enable();
+  playing << QStringLiteral("tidal:pl-1");
+  QSet<QString> open;
+  view.SetSnapshotOpenFunction([&open](const QString &) { return false; });
+  view.RunAutoRefreshIfDue();
+  ASSERT_TRUE(WaitRunDone());
+  Pump();
+  view.resize(340, 640);
+  Pump();
+  EXPECT_TRUE(view.compact());
+  EXPECT_TRUE(FitsHorizontally(view));
+  EXPECT_LE(view.auto_check()->sizeHint().width(), 340 - 16);
+  // The automatic refresh row adds nothing to the minimum width of the page.
+  const int with_row = view.minimumSizeHint().width();
+  view.auto_check()->hide();
+  view.auto_status_label()->hide();
+  view.auto_resume_button()->hide();
+  view.layout()->invalidate();
+  EXPECT_EQ(with_row, view.minimumSizeHint().width());
+  EXPECT_TRUE(view.auto_status_label()->wordWrap());
+  view.SetSnapshotOpenFunction(nullptr);
+}
+
+TEST_F(StreamingImportRenderTest, AutomaticRefreshStates) {
+  RenderAll(QStringLiteral("streaming-9-auto-refresh"), [](StreamingImportView &view, FakeAccount &account, FakeSource &) {
+    account.signed_in = true;
+    view.session(QStringLiteral("tidal"))->Refresh();
+    view.SetSnapshotExistsFunction([](const QString &) { return true; });
+    view.SetSnapshotOpenFunction([](const QString &identity) { return identity != QStringLiteral("tidal:pl-2"); });
+    view.SetSnapshotPlayingFunction([](const QString &identity) { return identity == QStringLiteral("tidal:pl-1"); });
+    QObject::connect(&view, &StreamingImportView::SnapshotReady, &view, [&view](const QString &, const QString &, const QString &name, const SongList &songs, const int skipped) {
+      view.ShowImported(name, true, static_cast<int>(songs.count()), skipped);
+    });
+    view.Activate();
+    WaitFor([&view]() { return view.current_page() == StreamingImportView::PageList; });
+    view.auto_check()->click();
+    view.RunAutoRefreshIfDue();
+    WaitFor([&view]() { return !view.auto_refresh_running(); });
+  });
 }
