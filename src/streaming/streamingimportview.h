@@ -29,6 +29,8 @@
 #include <QMap>
 #include <QSet>
 #include <QString>
+#include <QStringList>
+#include <QTimer>
 #include <QWidget>
 
 #include "core/song.h"
@@ -36,6 +38,7 @@
 #include "streamingaccount.h"
 
 class QButtonGroup;
+class QCheckBox;
 class QFrame;
 class QLabel;
 class QLineEdit;
@@ -55,6 +58,9 @@ class QBoxLayout;
 // - The remote playlists as cards with search, import and refresh. Progress and Cancel while reading.
 // - Failures stay visible in a banner until they are resolved or dismissed, with the actions that fit the cause (Reconnect, Retry) and collapsible technical details.
 // - A failed refresh never throws away the last list that was loaded.
+// - Optional, per service and off by default: Adrift re-reads the playlists that are already local snapshots, one after the other, about every 15 minutes while it runs.
+//   It never imports playlists that are not local yet, never writes to the service, never touches the playlist that is playing (it is left for the next run),
+//   pauses on any failure with a visible Resume, waits out Retry-After, and the opt-in belongs to the account that enabled it.
 // - Everything is read-only towards the service. Importing creates or replaces a local snapshot (see PlaylistManager::ImportSnapshot).
 class StreamingImportView : public QWidget {
   Q_OBJECT
@@ -86,6 +92,20 @@ class StreamingImportView : public QWidget {
   void ShowImported(const QString &playlist_name, const bool replaced, const int track_count, const int skipped);
   void ShowImportFailed(const QString &playlist_name, const QString &reason);
 
+  // Whether the snapshot is the playlist that is playing right now (or paused in the player). Asked before reading and again right before a snapshot is replaced.
+  void SetSnapshotPlayingFunction(std::function<bool(const QString &identity)> function) { snapshot_playing_ = function; }
+
+  // Automatic refresh of existing snapshots. The opt-in is stored by the host (see AutoRefreshChanged) together with the account it was given for.
+  static constexpr int kDefaultAutoRefreshMs = 15 * 60 * 1000;
+  void SetAutoRefreshInterval(const int msecs);
+  // Restores a stored opt-in at start. It only applies while that same account is signed in; another account drops it. Never reads anything by itself.
+  void RestoreAutoRefresh(const QString &service_key, const QString &account_key);
+  // Starts one run for the first service that is due, if nothing else is reading. Called on activation, by the timer and by the host after start.
+  void RunAutoRefreshIfDue();
+  bool auto_refresh_enabled(const QString &service_key) const;
+  bool auto_refresh_running() const;
+  bool auto_refresh_paused(const QString &service_key) const;
+
   static QString Identity(const QString &url_scheme, const QString &playlist_id);
 
   // Parts for tests and for the host's focus handling.
@@ -111,6 +131,9 @@ class StreamingImportView : public QWidget {
   QPushButton *banner_dismiss() const { return banner_dismiss_; }
   QToolButton *banner_details_toggle() const { return banner_details_toggle_; }
   QPlainTextEdit *banner_details() const { return banner_details_; }
+  QCheckBox *auto_check() const { return auto_check_; }
+  QLabel *auto_status_label() const { return auto_status_; }
+  QPushButton *auto_resume_button() const { return auto_resume_; }
   QProgressBar *progress_bar() const { return progress_; }
   QPushButton *save_setup_button() const { return button_save_setup_; }
   QLineEdit *setup_field(const QString &key) const { return setup_edits_.value(key); }
@@ -133,6 +156,8 @@ class StreamingImportView : public QWidget {
   void ServiceSettingsRequested(const QString &service_key);
   // A sign-in ended (browser return, failure, timeout or cancel). The host may bring this page forward, it does not need to do anything else.
   void SignInFinished(const QString &service_key, const bool success);
+  // The user turned automatic refresh on or off, or it was dropped because another account signed in. The host stores it; `account_key` is empty when off.
+  void AutoRefreshChanged(const QString &service_key, const bool enabled, const QString &account_key);
 
  protected:
   void showEvent(QShowEvent *e) override;
@@ -165,7 +190,30 @@ class StreamingImportView : public QWidget {
     QString status;
     QString opened_identity;  // last successfully imported snapshot, for "Open"
     QDateTime retry_blocked_until;
+
+    // Automatic refresh of existing snapshots
+    struct AutoRun {
+      bool active = false;
+      bool reading_list = false;
+      QList<PlaylistImport::PlaylistInfo> queue;
+      PlaylistImport::PlaylistInfo current;
+      int total = 0;
+      int refreshed = 0;
+    };
+    bool auto_enabled = false;
+    QString auto_account;  // the account that turned it on
+    bool auto_paused = false;
+    QDateTime auto_due;  // invalid: due now
+    QDateTime auto_last_ok;
+    bool auto_waiting_rate_limit = false;
+    QStringList auto_deferred;  // names of playing snapshots that were left alone, until a run refreshes them
+    QSet<QString> auto_deferred_ids;
+    QString auto_result;
+    bool auto_committing = false;
+    bool auto_replied = false;
+    AutoRun run;
   };
+  enum class AutoEnd { Done, Cancelled, Failed, Ineligible };
 
   Svc *current();
   const Svc *current() const;
@@ -192,6 +240,23 @@ class StreamingImportView : public QWidget {
   void MaybeAutoLoad(Svc *svc);
   void DiscardIfAccountChanged(Svc *svc);
   void SaveSetup();
+  // automatic refresh
+  bool AnyRun() const;
+  Svc *RunningSvc() const;
+  bool AutoAccountMatches(Svc *svc);
+  bool AutoDue(Svc *svc);
+  void StartAutoRun(Svc *svc);
+  void AutoNext(Svc *svc);
+  void AutoCommit(Svc *svc, const PlaylistImport::PlaylistInfo &playlist, const QList<PlaylistImport::Track> &tracks, const int skipped);
+  void AutoDefer(Svc *svc, const PlaylistImport::PlaylistInfo &playlist);
+  void EndAutoRun(Svc *svc, const AutoEnd how, const QString &detail = QString());
+  void CancelAuto(Svc *svc);
+  void SetAutoEnabled(Svc *svc, const bool enabled);
+  void DropAutoOptIn(Svc *svc, const QString &reason);
+  void UpdateAutoRow(const Svc *svc);
+  bool SnapshotExistsNow(const Svc *svc, const QString &identity) const;
+  bool SnapshotPlaying(const Svc *svc, const QString &playlist_id) const;
+  QString AutoStatusText(const Svc *svc) const;
   void ApplyCompact();
   void FitBannerText();
   bool SnapshotExists(const Svc *svc, const QString &playlist_id) const;
@@ -201,6 +266,9 @@ class StreamingImportView : public QWidget {
   QList<Svc*> services_;
   int current_ = -1;
   std::function<bool(const QString &)> snapshot_exists_;
+  std::function<bool(const QString &)> snapshot_playing_;
+  QTimer auto_timer_;
+  int auto_interval_ms_ = kDefaultAutoRefreshMs;
   bool compact_ = false;
 
   // Header
@@ -252,6 +320,9 @@ class StreamingImportView : public QWidget {
   QPushButton *button_empty_reload_;
 
   // Footer
+  QCheckBox *auto_check_ = nullptr;
+  QLabel *auto_status_ = nullptr;
+  QPushButton *auto_resume_ = nullptr;
   QLabel *label_status_;
   QProgressBar *progress_;
   QPushButton *button_cancel_;

@@ -1819,6 +1819,30 @@ void MainWindow::BuildStreamingView() {
 #endif
 
   streaming_view_->SetSnapshotExistsFunction([this](const QString &identity) { return app_->playlist_manager()->HasSnapshot(identity); });
+  // Automatic refresh of existing snapshots: off unless the user turned it on, and bound to the account that did.
+  // The playing playlist is never replaced: it is the active playlist while the player plays or is paused.
+  streaming_view_->SetSnapshotPlayingFunction([this](const QString &identity) {
+    const int id = app_->playlist_manager()->FindSnapshotId(identity);
+    if (id < 0 || id != app_->playlist_manager()->active_id()) return false;
+    const EngineBase::State state = app_->player()->GetState();
+    return state == EngineBase::State::Playing || state == EngineBase::State::Paused;
+  });
+  {
+    Settings s;
+    s.beginGroup(u"StreamingImport"_s);
+    for (const QString &key : { u"tidal"_s, u"qobuz"_s }) {
+      if (s.value(u"auto_refresh_"_s + key, false).toBool()) streaming_view_->RestoreAutoRefresh(key, s.value(u"auto_refresh_account_"_s + key).toString());
+    }
+    s.endGroup();
+  }
+  QObject::connect(streaming_view_, &StreamingImportView::AutoRefreshChanged, this, [](const QString &key, const bool enabled, const QString &account_key) {
+    Settings s;
+    s.beginGroup(u"StreamingImport"_s);
+    s.setValue(u"auto_refresh_"_s + key, enabled);
+    if (enabled) s.setValue(u"auto_refresh_account_"_s + key, account_key);
+    else s.remove(u"auto_refresh_account_"_s + key);
+    s.endGroup();
+  });
   QObject::connect(streaming_view_, &StreamingImportView::SnapshotReady, this, [this](const QString &, const QString &identity, const QString &name, const SongList &songs, const int skipped) {
     bool replaced = false;
     const int id = app_->playlist_manager()->ImportSnapshot(name, identity, songs, &replaced);
@@ -1984,6 +2008,20 @@ void MainWindow::SetupListeningRoom() {
   QObject::connect(&*manager, &PlaylistManager::PlaylistRenamed, this, &MainWindow::ScheduleRoomRefresh);
   QObject::connect(&*manager, &PlaylistManager::PlaylistChanged, this, &MainWindow::ScheduleRoomRefresh);
   QObject::connect(&*manager, &PlaylistManager::AllPlaylistsLoaded, this, &MainWindow::ScheduleRoomRefresh);
+
+  // An opt-in automatic refresh of imported streaming playlists gets its first turn shortly after start, without showing anything or moving focus.
+  {
+    Settings s;
+    s.beginGroup(u"StreamingImport"_s);
+    const bool any = s.value(u"auto_refresh_tidal"_s, false).toBool() || s.value(u"auto_refresh_qobuz"_s, false).toBool();
+    s.endGroup();
+    if (any) {
+      QTimer::singleShot(45000, this, [this]() {
+        BuildStreamingView();
+        if (streaming_view_) streaming_view_->RunAutoRefreshIfDue();
+      });
+    }
+  }
 
   // Start state: the user's volume is shown, never set.
   room_->SetVolume(static_cast<int>(player->GetVolume()));
