@@ -1778,6 +1778,7 @@ TEST_F(AutoRefreshTest, TurningItOnIsStoredWithTheAccountAndWaitsForTheNextActiv
 
 TEST_F(AutoRefreshTest, RefreshesOnlyExistingSnapshotsOneAfterTheOther) {
   Enable();
+  const QString manual_status = view.status_label()->text();
   view.RunAutoRefreshIfDue();
   EXPECT_TRUE(view.auto_refresh_running());
   ASSERT_TRUE(WaitRunDone());
@@ -1786,6 +1787,7 @@ TEST_F(AutoRefreshTest, RefreshesOnlyExistingSnapshotsOneAfterTheOther) {
   EXPECT_EQ(track_order, QStringList() << QStringLiteral("pl-1") << QStringLiteral("pl-3"));  // pl-2 was never imported: never read
   EXPECT_EQ(snapshots, QStringList() << QStringLiteral("tidal:pl-1") << QStringLiteral("tidal:pl-3"));
   EXPECT_FALSE(overlapping);
+  EXPECT_EQ(manual_status, view.status_label()->text());
   EXPECT_NE(view.auto_status_label()->text().indexOf(QStringLiteral("Updated 2 imported playlists")), -1);
   // Done: the next run is a whole interval away.
   const int before = source->requests;

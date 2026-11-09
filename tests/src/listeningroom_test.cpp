@@ -1020,11 +1020,12 @@ TEST(ListeningRoomTest, PageHeadingsLineUpAcrossPages) {
   EXPECT_GE(button_pos.y(), playlists_pos.y() - 4);
   EXPECT_LE(button_pos.y(), playlists_pos.y() + 12);
 
-  // The Streaming page says in its own heading that imported playlists are refreshed by hand (there is no separate tag for it).
+  // The Streaming heading describes refreshing local copies and the optional automatic updates.
   room.nav_button(ListeningRoom::View::Streaming)->click();
   QLabel *description = room.page(ListeningRoom::View::Streaming)->findChild<QLabel*>(QStringLiteral("page_description"));
   ASSERT_NE(nullptr, description);
-  EXPECT_TRUE(description->text().contains(QStringLiteral("refresh")));
+  EXPECT_TRUE(description->text().contains(QStringLiteral("refresh"), Qt::CaseInsensitive));
+  EXPECT_TRUE(description->text().contains(QStringLiteral("automatically")));
 
 }
 

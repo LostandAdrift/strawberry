@@ -740,6 +740,8 @@ void StreamingImportView::ConnectService(Svc *svc) {
   QObject::connect(importer, &PlaylistImport::Importer::StateChanged, this, [this]() { UpdateAll(); });
   QObject::connect(importer, &PlaylistImport::Importer::Progress, this, [this, svc](const int loaded, const int total) {
     if (svc != current()) return;
+    // Background refresh has its own status row. Do not leave its progress in the user's manual-import status after the run finishes.
+    if (svc->run.active) return;
     if (svc->run.active) {
       // The automatic run reports in its own status line and must not leave "Reading…" behind as the page's status.
       progress_->setRange(0, total > 0 ? total : 0);
