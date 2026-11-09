@@ -882,7 +882,7 @@ void ListeningRoom::BuildStreamingPage() {
   layout->setContentsMargins(40, 32, 40, 20);
   layout->setSpacing(10);
 
-  AddPageHeader(layout, font(), tr("Streaming"), tr("Sign in, browse your favorites and import playlists. Imported playlists are local copies that you refresh yourself."));
+  AddPageHeader(layout, font(), tr("Streaming"), tr("Sign in, browse your favorites and import playlists. Refresh your local copies here or keep them updated automatically."));
 
   // One page: the account, the playlists, and every problem are the hosted widget's (StreamingImportView); this is its place.
   streaming_host_layout_ = new QVBoxLayout(streaming_host_);
