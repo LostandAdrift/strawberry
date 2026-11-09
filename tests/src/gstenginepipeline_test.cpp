@@ -20,6 +20,7 @@
 #include "config.h"
 
 #include <gst/gst.h>
+#include <mutex>
 
 #include <QtGlobal>
 
@@ -38,6 +39,8 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QTemporaryFile>
+#include <QDataStream>
 
 #include "engine/gststartup.h"
 #include "engine/gstenginepipeline.h"
@@ -49,6 +52,7 @@ using namespace Qt::Literals::StringLiterals;
 // Declared at file scope so that GstEnginePipeline's "friend class GstEnginePipelineTest;" resolves to this class.
 class GstEnginePipelineTest {
  public:
+  static GstElement *AudioSink(GstEnginePipeline &pipeline) { return pipeline.audiosink_; }
   // Waits until the GStreamer pipeline itself is in the state, without processing the bus messages, so the cached state in the GstEnginePipeline is not updated.
   static bool WaitForPipelineState(GstEnginePipeline &pipeline, const GstState state, const int timeout_msec = 10000) {
     QElapsedTimer timer;
@@ -83,6 +87,31 @@ class GstEnginePipelineTest {
 
 namespace {
 
+struct PcmCapture {
+  std::mutex mutex;
+  QByteArray bytes;
+  int rate = 0;
+  int channels = 0;
+  QString format;
+};
+
+void CapturePcm(GstElement *, GstBuffer *buffer, GstPad *pad, gpointer user_data) {
+  auto &capture = *static_cast<PcmCapture *>(user_data);
+  std::lock_guard<std::mutex> lock(capture.mutex);
+  GstMapInfo map;
+  if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+    capture.bytes.append(reinterpret_cast<const char *>(map.data), static_cast<qsizetype>(map.size));
+    gst_buffer_unmap(buffer, &map);
+  }
+  if (GstCaps *caps = gst_pad_get_current_caps(pad)) {
+    const GstStructure *structure = gst_caps_get_structure(caps, 0);
+    gst_structure_get_int(structure, "rate", &capture.rate);
+    gst_structure_get_int(structure, "channels", &capture.channels);
+    capture.format = QString::fromUtf8(gst_structure_get_string(structure, "format"));
+    gst_caps_unref(caps);
+  }
+}
+
 // Processes Qt events, and the default GLib context, which receives the pipeline bus messages, Qt only processes it when it uses the GLib event dispatcher.
 void ProcessEvents() {
   QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
@@ -108,6 +137,68 @@ void ProcessEventsFor(const int duration_msec) {
   while (timer.elapsed() < duration_msec) {
     ProcessEvents();
   }
+}
+
+// Capture at the actual output of the production pipeline, without opening an audio device.
+// This proves sample preservation only inside the app, not at a driver or physical DAC.
+TEST(GstEnginePipelineTest, PcmPreservationAndSoftwareVolumeAtSink) {
+
+  GstStartup::Initialize();
+  for (const int bits : {16, 24, 32}) {
+    for (const int rate : {44100, 48000, 96000}) {
+      for (const int volume : {-1, 100, 50}) {
+        SCOPED_TRACE(volume);
+        SCOPED_TRACE(QStringLiteral("%1 bit / %2 Hz").arg(bits).arg(rate).toStdString());
+        QByteArray pcm;
+        // Deterministic non-silent samples, including low bits that a lossy float conversion would drop.
+        quint32 value = 0x12345678;
+        for (int sample = 0; sample < 8192; ++sample) {
+          value = value * 1664525u + 1013904223u;
+          for (int byte = 0; byte < bits / 8; ++byte) pcm.append(static_cast<char>(value >> (byte * 8)));
+        }
+        QTemporaryFile file;
+        ASSERT_TRUE(file.open());
+        QDataStream wav(&file);
+        wav.setByteOrder(QDataStream::LittleEndian);
+        wav.writeRawData("RIFF", 4);
+        wav << quint32(36 + pcm.size());
+        wav.writeRawData("WAVEfmt ", 8);
+        wav << quint32(16) << quint16(1) << quint16(2) << quint32(rate) << quint32(rate * 2 * bits / 8) << quint16(2 * bits / 8) << quint16(bits);
+        wav.writeRawData("data", 4);
+        wav << quint32(pcm.size());
+        wav.writeRawData(pcm.constData(), static_cast<int>(pcm.size()));
+        ASSERT_TRUE(file.flush());
+
+        PcmCapture capture;
+        bool finished = false;
+        GstEnginePipeline pipeline;
+        pipeline.set_output_device(u"fakesink"_s, QVariant());
+        pipeline.set_volume_enabled(volume >= 0);
+        pipeline.set_device_warmup_duration_ms(0);
+        const QUrl url = QUrl::fromLocalFile(file.fileName());
+        QString error;
+        ASSERT_TRUE(pipeline.InitFromUrl(url, url, url.toEncoded(), 0, 0, 0.0, error)) << error.toStdString();
+        if (volume >= 0) pipeline.SetVolume(volume);
+        GstElement *sink = GstEnginePipelineTest::AudioSink(pipeline);
+        ASSERT_NE(nullptr, sink);
+        g_object_set(sink, "signal-handoffs", TRUE, "sync", FALSE, nullptr);
+        g_signal_connect(sink, "handoff", G_CALLBACK(CapturePcm), &capture);
+        QObject::connect(&pipeline, &GstEnginePipeline::EndOfStreamReached, &pipeline, [&finished](int, bool) { finished = true; });
+        pipeline.Play(false, 0);
+        ASSERT_TRUE(WaitFor([&finished]() { return finished; }));
+        std::lock_guard<std::mutex> lock(capture.mutex);
+        EXPECT_EQ(rate, capture.rate);
+        EXPECT_EQ(2, capture.channels);
+        EXPECT_EQ(QStringLiteral("S%1LE").arg(bits), capture.format);
+        if (volume == 50) {
+          EXPECT_EQ(pcm.size(), capture.bytes.size());
+          EXPECT_NE(pcm, capture.bytes);
+        }
+        else EXPECT_EQ(pcm, capture.bytes);
+      }
+    }
+  }
+
 }
 
 // Regression test: pausing while playback was waiting for the audio device warm-up was ignored, and the warm-up timer then started playback anyway.
