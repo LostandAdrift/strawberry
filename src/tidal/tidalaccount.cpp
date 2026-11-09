@@ -55,7 +55,7 @@ QList<AccountBackend::SetupField> TidalAccount::setup_fields() const {
   SetupField client_id;
   client_id.key = u"client_id"_s;
   client_id.label = tr("Tidal client ID");
-  client_id.placeholder = tr("Client ID of your Tidal developer app");
+  client_id.placeholder = tr("Client ID compatible with Strawberry's Tidal sign-in");
   return QList<SetupField>() << client_id;
 
 }
@@ -88,7 +88,7 @@ bool TidalAccount::SaveSetup(const QMap<QString, QString> &values, QString *erro
 
   const QString client_id = values.value(u"client_id"_s).trimmed();
   if (client_id.isEmpty()) {
-    if (error) *error = tr("Enter the client ID of your Tidal developer app.");
+    if (error) *error = tr("Enter a client ID that already works with Strawberry's Tidal sign-in. Your email, password and ordinary developer-dashboard client IDs cannot be used here.");
     return false;
   }
   if (client_id.contains(u' ') || client_id.size() < 8) {
