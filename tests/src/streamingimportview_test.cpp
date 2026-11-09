@@ -902,6 +902,7 @@ TEST_F(OAuthCallbackTest, ACallbackCanOnlyBeUsedOnce) {
 #include <QTcpSocket>
 
 #include "tidal/tidalaccount.h"
+#include "tidal/tidalservice.h"
 
 namespace {
 
@@ -1245,6 +1246,17 @@ TEST(OAuthLegacyConsumerTest, AConsumerThatDoesNotKnowAboutAttemptsStillSeesAFai
   EXPECT_FALSE(errors.at(0).isEmpty());
   // And with a browser address handler nobody connected, the modal fallback is what shows the address: nothing is emitted for it.
   EXPECT_EQ(1, catcher.urls.count());
+
+}
+
+TEST(TidalAccountBuildTest, CompiledApplicationConfigurationIsUsable) {
+
+  if (!TidalService::HasCompiledCredentials()) GTEST_SKIP() << "Custom build without release application configuration";
+  // Exercise the production decoding path without printing application configuration.
+  const QString client_id = TidalService::CompiledClientId();
+  EXPECT_FALSE(client_id.isEmpty());
+  EXPECT_FALSE(client_id.startsWith(QStringLiteral("ENC:")));
+  EXPECT_FALSE(client_id.contains(QChar::Space));
 
 }
 

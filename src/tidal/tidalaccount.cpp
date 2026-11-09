@@ -64,15 +64,10 @@ QString TidalAccount::setup_help() const { return SetupHelpText(); }
 
 QString TidalAccount::SetupHelpText() {
 
-  // What this backend really is (checked against the code: legacy scopes "r_usr w_usr", token endpoint login.tidal.com/oauth2/token, API api.tidalhifi.com/v1,
-  // redirect tidal://login/auth). Tidal's current developer dashboard issues IDs for a different sign-in (login.tidal.com/authorize + auth.tidal.com/v1 token
-  // endpoint, PKCE, newer scopes), and the Strawberry maintainer states that those dashboard client IDs are not compatible with this integration.
-  return tr("Adrift signs in to Tidal the way Strawberry's Tidal support always has, with Tidal's older sign-in and older API. "
-            "Client IDs created in Tidal's public developer dashboard use Tidal's newer sign-in and are not compatible with it, so creating an app there will not make this work. "
-            "Adrift does not include a client ID and does not take one from other apps. "
-            "\n\nIf you already have a client ID that works with Strawberry's Tidal support, paste it below; it is kept exactly as you enter it and is not a secret. "
-            "Without one, Tidal sign-in is not available in Adrift yet. Qobuz and your own music are not affected. "
-            "Playlists through Tidal's newer official API would need a separate sign-in that Adrift does not have.");
+  return tr("Tidal sign-in uses Strawberry's older API. Official Strawberry release sources include the application configuration needed for normal browser sign-in. "
+            "If this build asks for a client ID, its release configuration is missing: rebuild using the official release source material described in ADRIFT.md. "
+            "You do not need to register a developer application. Public developer-dashboard IDs are not compatible with this older integration. "
+            "For a custom build, an existing client ID that works with Strawberry can be entered below. Adrift does not take one from other apps.");
 
 }
 
