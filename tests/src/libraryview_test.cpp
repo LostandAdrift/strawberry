@@ -79,26 +79,28 @@ LibraryAlbumList AskAlbums(LibrarySource &source, Answer *answer = nullptr, cons
   LibraryAlbumList result;
   Answer local;
   Answer &out = answer ? *answer : local;
-  QObject::connect(&source, &LibrarySource::AlbumsLoaded, &source, [&](const quint64 id, const LibraryAlbumList &list, const bool ok) {
+  QObject receiver;
+  QObject::connect(&source, &LibrarySource::AlbumsLoaded, &receiver, [&](const quint64 id, const LibraryAlbumList &list, const bool ok) {
     if (id != 77) return;
     result = list;
     out.arrived = true;
     out.ok = ok;
   });
   source.RequestAlbums(77, filter);
-  QTest::qWaitFor([&]() { return out.arrived; }, timeout);
+  EXPECT_TRUE(QTest::qWaitFor([&]() { return out.arrived; }, timeout));
   return result;
 }
 SongList AskTracks(LibrarySource &source, const LibraryAlbum &album, const int timeout = 5000) {
   SongList result;
   bool arrived = false;
-  QObject::connect(&source, &LibrarySource::TracksLoaded, &source, [&](const quint64 id, const SongList &songs, const bool) {
+  QObject receiver;
+  QObject::connect(&source, &LibrarySource::TracksLoaded, &receiver, [&](const quint64 id, const SongList &songs, const bool) {
     if (id != 78) return;
     result = songs;
     arrived = true;
   });
   source.RequestTracks(78, album);
-  QTest::qWaitFor([&]() { return arrived; }, timeout);
+  EXPECT_TRUE(QTest::qWaitFor([&]() { return arrived; }, timeout));
   return result;
 }
 
@@ -777,12 +779,14 @@ TEST(CollectionLibrarySourceTest, ReadsOnTheBackendsOwnRunningThreadWithoutBlock
   struct Stop {
     QThread &thread;
     CollectionBackend &backend;
+    Database &database;
     ~Stop() {
+      QThread *caller = QThread::currentThread();
+      QMetaObject::invokeMethod(&backend, [&]() { database.Close(); backend.moveToThread(caller); }, Qt::BlockingQueuedConnection);
       thread.quit();
       thread.wait(5000);
-      backend.moveToThread(QThread::currentThread());
     }
-  } stop{thread, backend};
+  } stop{thread, backend, *database};
   backend.moveToThread(&thread);
   thread.start();
   // The in-memory database belongs to the connection of the thread that uses it, so the test fills it from the backend's thread too.
@@ -840,7 +844,11 @@ TEST(CollectionLibrarySourceTest, AStoppedBackendThreadAnswersWithAFailureAndThe
   view.reset();
   EXPECT_LT(timer.elapsed(), 1000);
 
-  backend.moveToThread(QThread::currentThread());
+  thread.start();
+  QThread *caller = QThread::currentThread();
+  QMetaObject::invokeMethod(&backend, [&]() { database->Close(); backend.moveToThread(caller); }, Qt::BlockingQueuedConnection);
+  thread.quit();
+  ASSERT_TRUE(thread.wait(5000));
 
 }
 
@@ -855,7 +863,7 @@ TEST(CollectionLibrarySourceTest, ABackendDeletedWithARequestQueuedAnswersWithAF
   backend->moveToThread(&thread);
   thread.start();
   QSemaphore entered, release;
-  QMetaObject::invokeMethod(&busy, [&]() { entered.release(); release.acquire(); }, Qt::QueuedConnection);
+  QMetaObject::invokeMethod(&busy, [&]() { entered.release(); release.acquire(); delete backend; }, Qt::QueuedConnection);
   entered.acquire();
 
   CollectionLibrarySource source(backend, nullptr);
@@ -863,12 +871,13 @@ TEST(CollectionLibrarySourceTest, ABackendDeletedWithARequestQueuedAnswersWithAF
   bool arrived = false;
   QObject::connect(&source, &LibrarySource::AlbumsLoaded, &source, [&](const quint64, const LibraryAlbumList &, const bool ok) { arrived = true; answer.ok = ok; });
   source.RequestAlbums(1, QString());
-  delete backend;  // the queued call is dropped with it; the job reports the failure
-  release.release();
-  QTest::qWaitFor([&]() { return arrived; }, 5000);
+  release.release();  // deletion on the owning thread drops the queued read; the job reports the failure
+  EXPECT_TRUE(QTest::qWaitFor([&]() { return arrived; }, 5000));
   EXPECT_TRUE(arrived);
   EXPECT_FALSE(answer.ok);
 
+  QThread *caller = QThread::currentThread();
+  QMetaObject::invokeMethod(&busy, [&]() { busy.moveToThread(caller); }, Qt::BlockingQueuedConnection);
   thread.quit();
   ASSERT_TRUE(thread.wait(5000));
 
@@ -899,8 +908,9 @@ TEST(CollectionLibrarySourceTest, ASourceDestroyedWhileTheBackendIsReadingIsNotT
   QCoreApplication::processEvents();
   EXPECT_EQ(0, answers);
 
+  QThread *caller = QThread::currentThread();
+  QMetaObject::invokeMethod(&backend, [&]() { database->Close(); backend.moveToThread(caller); busy.moveToThread(caller); }, Qt::BlockingQueuedConnection);
   thread.quit();
   ASSERT_TRUE(thread.wait(5000));
-  backend.moveToThread(QThread::currentThread());
 
 }
